@@ -73,9 +73,6 @@ def crop(image, target, region):
                 target['relationships'] = torch.LongTensor(rel)
                 target['predicate_labels'] = torch.LongTensor(rel_label)
 
-
-
-
     return cropped_image, target
 
 

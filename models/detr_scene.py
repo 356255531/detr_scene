@@ -46,7 +46,7 @@ class DETRScene(nn.Module):
         self.num_queries = num_queries
         self.hidden_dim = hidden_dim
 
-    def forward(self, scene=False, samples: NestedTensor=None, hs=None, indices=None, relationships=None):
+    def forward(self, scene=False, samples: NestedTensor=None, hs=None, indices=None, out=None, relationships=None):
         if not scene:
             if isinstance(samples, (list, torch.Tensor)):
                 samples = nested_tensor_from_tensor_list(samples)
@@ -125,16 +125,16 @@ class DETRScene(nn.Module):
                 sub_repr = aligned_flatten_hs[sub_indices + delta_indices]
                 obj_repr = aligned_flatten_hs[obj_indices + delta_indices]
                 pred_predicate_logits.append(self.predicate_emb(torch.cat([sub_repr, obj_repr], dim=-1)))
-                ret = {'pred_predicate_logits': pred_predicate_logits}
-        return ret
+            out['pred_predicate_logits'] = pred_predicate_logits
 
-    def postprocess_outputs(self, out):
-        if self.aux_loss:
-            out['aux_outputs'] = self._set_aux_loss(out['pred_logits'], out['pred_boxes'], [_[:-1] for _ in out['pred_predicate_logits']])
-            # out['aux_outputs'] = self._set_aux_loss(out['pred_logits'], out['pred_boxes'])
-        out['pred_logits'], out['pred_boxes'] = out['pred_logits'][-1], out['pred_boxes'][-1]
-        out['pred_predicate_logits'] = [_[-1] for _ in out['pred_predicate_logits']]
-        return out
+            if self.aux_loss:
+                out['aux_outputs'] = self._set_aux_loss(out['pred_logits'], out['pred_boxes'],
+                                                        [_[:-1] for _ in out['pred_predicate_logits']])
+            out['pred_logits'], out['pred_boxes'] = out['pred_logits'][-1], out['pred_boxes'][-1]
+            out['pred_predicate_logits'] = [_[-1] for _ in out['pred_predicate_logits']]
+
+            ret = out
+        return ret
 
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord, outpus_predicate_class):

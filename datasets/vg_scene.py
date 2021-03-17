@@ -25,6 +25,8 @@ class VGScene(VGDetection):
         img, target = prepare_vg(img, target)
         if self._transforms is not None:
             img, target = self._transforms(img, target)
+            if len(target['relationships']) == 0:
+                return None
         return img, target
 
 
