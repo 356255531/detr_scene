@@ -33,6 +33,19 @@ class HungarianMatcher(nn.Module):
 
     @torch.no_grad()
     def forward(self, outputs, targets):
+        pred_logits_all = outputs['pred_logits']
+        pred_boxes_all = outputs['pred_boxes']
+
+        if pred_logits_all.ndim == 3:
+            return self._forward(pred_logits_all, pred_boxes_all, targets)
+        if pred_logits_all.ndim == 4:
+            if 'predicate_labels' in targets[0].keys():
+                pred_logits_all = pred_logits_all[:, :, :-1, :]
+                pred_boxes_all = pred_boxes_all[:, :, :-1, :]
+            return [self._forward(pred_logits, pred_boxes, targets) for pred_logits, pred_boxes in zip(pred_logits_all, pred_boxes_all)]
+        raise AttributeError('pred_logits dimension error')
+
+    def _forward(self, pred_logits, pred_boxes, targets):
         """ Performs the matching
 
         Params:
@@ -52,11 +65,11 @@ class HungarianMatcher(nn.Module):
             For each batch element, it holds:
                 len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
         """
-        bs, num_queries = outputs["pred_logits"].shape[:2]
+        bs, num_queries = pred_logits.shape[:2]
 
         # We flatten to compute the cost matrices in a batch
-        out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
-        out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
+        out_prob = pred_logits.flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
+        out_bbox = pred_boxes.flatten(0, 1)  # [batch_size * num_queries, 4]
 
         # Also concat the target labels and boxes
         tgt_ids = torch.cat([v["labels"] for v in targets])

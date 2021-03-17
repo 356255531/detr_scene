@@ -1,0 +1,7 @@
+python check_statistics.py
+python scene_preprocessing.py
+python check_statistics_preprocessed.py
+python scene_postprocessing.py
+python obj_visual_postprocessed.py
+python rel_visual_postprocessed.py
+python scene_graph_split.py
