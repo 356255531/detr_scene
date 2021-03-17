@@ -8,6 +8,7 @@ import PIL
 import torch
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
+import numpy as np
 
 from util.box_ops import box_xyxy_to_cxcywh
 from util.misc import interpolate
@@ -52,6 +53,28 @@ def crop(image, target, region):
 
         for field in fields:
             target[field] = target[field][keep]
+
+        rel = []
+        rel_label = []
+        if "relationships" in target:
+            # e.g., keep = torch.tensor([True, False, True]), keep.size(#bbox, 1)
+            # step 1: filter out the non-exist idx, filter out the relationships including idx 1
+            # For example, relationships = [[0, 1], [0, 2], [1, 2], [2, 0]] => relationships = [[0, 2], [2, 0]]
+            # Step 2: find a lookup dictionary {old_idx: new_idx}
+            # reindex relationships using lookup dictionary => relationships = [[0, 1], [1, 0]]
+            # Do some reindexing
+            if len(keep) != np.sum(keep.numpy()):
+                rel_label_id = 0
+                for rel_sub,rel_ob in target['relationships']:
+                     if keep[rel_sub] and keep[rel_ob]:
+                         rel.append([np.sum(keep[:rel_sub].numpy()), np.sum(keep[:rel_ob].numpy())])
+                         rel_label.append(target['predicate_labels'][rel_label_id].item())
+                     rel_label_id += 1
+                target['relationships'] = torch.LongTensor(rel)
+                target['predicate_labels'] = torch.LongTensor(rel_label)
+
+
+
 
     return cropped_image, target
 

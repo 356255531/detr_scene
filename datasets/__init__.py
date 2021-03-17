@@ -3,6 +3,8 @@ import torch.utils.data
 import torchvision
 
 from .coco import build as build_coco
+from .vg_scene import build as build_vg_scene
+from .vg_detection import build as build_vg_detection
 
 
 def get_coco_api_from_dataset(dataset):
@@ -22,4 +24,8 @@ def build_dataset(image_set, args):
         # to avoid making panopticapi required for coco
         from .coco_panoptic import build as build_coco_panoptic
         return build_coco_panoptic(image_set, args)
+    if args.dataset_file == 'vg_scene':
+        return build_vg_scene(image_set, args)
+    if args.dataset_file == 'vg_detection':
+        return build_vg_detection(image_set, args)
     raise ValueError(f'dataset {args.dataset_file} not supported')
