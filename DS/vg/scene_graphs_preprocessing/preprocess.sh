@@ -1,7 +1,7 @@
-python check_statistics.py
-python scene_preprocessing.py
-python check_statistics_preprocessed.py
-python scene_postprocessing.py
-python obj_visual_postprocessed.py
-python rel_visual_postprocessed.py
-python scene_graph_split.py
+python3 check_statistics.py
+python3 scene_preprocessing.py
+python3 check_statistics_preprocessed.py
+python3 scene_postprocessing.py
+python3 obj_visual_postprocessed.py
+python3 rel_visual_postprocessed.py
+python3 scene_graph_split.py

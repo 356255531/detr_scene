@@ -46,107 +46,87 @@ class DETRScene(nn.Module):
         self.num_queries = num_queries
         self.hidden_dim = hidden_dim
 
-    def forward_non_scene(self, samples: NestedTensor):
-        """ The forward expects a NestedTensor, which consists of:
-               - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
-               - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
+    def forward(self, scene=False, samples: NestedTensor=None, hs=None, indices=None, relationships=None):
+        if not scene:
+            if isinstance(samples, (list, torch.Tensor)):
+                samples = nested_tensor_from_tensor_list(samples)
+            features, pos = self.backbone(samples)
 
-            It returns a dict with the following elements:
-               - "pred_logits": the classification logits (including no-object) for all queries.
-                                Shape= [batch_size x num_queries x (num_classes + 1)]
-               - "pred_boxes": The normalized boxes coordinates for all queries, represented as
-                               (center_x, center_y, height, width). These values are normalized in [0, 1],
-                               relative to the size of each individual image (disregarding possible padding).
-                               See PostProcess for information on how to retrieve the unnormalized bounding box.
-               - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
-                                dictionnaries containing the two above keys for each decoder layer.
-        """
-        if isinstance(samples, (list, torch.Tensor)):
-            samples = nested_tensor_from_tensor_list(samples)
-        features, pos = self.backbone(samples)
+            src, mask = features[-1].decompose()
+            assert mask is not None
+            hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[0]
 
-        src, mask = features[-1].decompose()
-        assert mask is not None
-        hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[0]
+            outputs_class = self.class_embed(hs)
+            outputs_coord = self.bbox_embed(hs).sigmoid()
 
-        outputs_class = self.class_embed(hs)
-        outputs_coord = self.bbox_embed(hs).sigmoid()
+            out = {'pred_logits': outputs_class, 'pred_boxes': outputs_coord}
+            ret = out, hs
+        else:
+            hs_size = hs.size()  # [#decoder_layer x batch_size x #bbox x #hidden]
+            num_decoder_layer = hs_size[0]  # 6
+            batch_size = hs_size[1]  # 2
+            num_queries = hs_size[2]  # 101
+            hidden_dim = hs_size[3]  # 256
 
-        out = {'pred_logits': outputs_class, 'pred_boxes': outputs_coord}
+            # Align indices
+            src_indices = [[single_idx[0] for single_idx in idx] for idx in indices]
+            lengths = torch.tensor([src_idx.shape[0] for src_idx in src_indices[0]])
+            max_match_length = torch.max(lengths)
+            complementary_lengths = max_match_length - lengths
+            complementary_tensor = [torch.full((length,), num_queries - 1, dtype=torch.int64, device=hs.device) for
+                                    length in complementary_lengths]
+            complementary_tensor = [complementary_tensor for _ in range(len(indices))]
+            src_indices = torch.cat(  # [#decoder_layer x batch_size x #bbox]
+                [
+                    torch.cat(
+                        [torch.cat([i.to(hs.device), j]).unsqueeze(0) for i, j in zip(src_idx, ct)]
+                    ).unsqueeze(0) for src_idx, ct in zip(src_indices, complementary_tensor)
+                ]
+            )
 
-        return out, hs
+            # reindex hs
+            flatten_hs = hs.reshape(-1, hidden_dim)
+            flatten_src_indices = src_indices.reshape(-1, max_match_length)
+            delta_indices = torch.arange(0, num_decoder_layer * batch_size, device=hs.device).reshape(-1, 1)
+            delta_indices = delta_indices.repeat([1, max_match_length]) * (self.num_queries + 1)
+            aligned_flatten_hs = flatten_hs[(flatten_src_indices + delta_indices).reshape(
+                -1)]  # [(max_box_per_image * batch_size * #decode_layer) x hidden_dim]
 
-    def forward_scene(self, hs, indices, relationships):
-        """ 
-        TODO： we know there is a severe bug in this funtion.
-        TODO： The first task is to locate this bug and derive the strategy of how to correctly permute the output of decoder
-        TODO： as well as the target index in relationships
-
-        By debuging, feel free to use pdb （setting break points）
-        import pdb
-        pdb.set_trace()
-        """
-        hs_size = hs.size()  # [#decoder_layer x batch_size x #bbox x #hidden]
-        num_decoder_layer = hs_size[0]  # 6
-        batch_size = hs_size[1]         # 2
-        num_queries = hs_size[2]        # 101
-        hidden_dim = hs_size[3]         # 256
-
-
-        # Align indices
-        src_indices = [[single_idx[0] for single_idx in idx] for idx in indices]
-        lengths = torch.tensor([src_idx.shape[0] for src_idx in src_indices[0]])
-        max_match_length = torch.max(lengths)
-        complementary_lengths = max_match_length - lengths
-        complementary_tensor = [torch.full((length,), num_queries - 1, dtype=torch.int64, device=hs.device) for length in complementary_lengths]
-        complementary_tensor = [complementary_tensor for _ in range(len(indices))]
-        src_indices = torch.cat(  # [#decoder_layer x batch_size x #bbox]
-            [
-                torch.cat(
-                    [torch.cat([i.to(hs.device), j]).unsqueeze(0) for i, j in zip(src_idx, ct)]
-                ).unsqueeze(0) for src_idx, ct in zip(src_indices, complementary_tensor)
-            ]
-        )
-
-        # reindex hs
-        flatten_hs = hs.reshape(-1, hidden_dim)
-        flatten_src_indices = src_indices.reshape(-1, max_match_length)
-        delta_indices = torch.arange(0, num_decoder_layer * batch_size, device=hs.device).reshape(-1, 1)
-        delta_indices = delta_indices.repeat([1, max_match_length]) * (self.num_queries + 1)
-        aligned_flatten_hs = flatten_hs[(flatten_src_indices + delta_indices).reshape(-1)]  # [(max_box_per_image * batch_size * #decode_layer) x hidden_dim]
-
-        # reindex relationships
-        tgt_indices = [[single_idx[1] for single_idx in idx] for idx in indices]
-        lengths = torch.tensor([tgt_idx.shape[0] for tgt_idx in tgt_indices[0]])
-        max_rel_length = torch.max(lengths)
-        complementary_lengths = max_rel_length - lengths
-        complementary_tensor = [torch.full((length,), max_rel_length - 1, dtype=torch.int64, device=hs.device) for length
-                                in complementary_lengths]
-        complementary_tensor = [complementary_tensor for _ in range(len(indices))]
-        tgt_indices = torch.cat(  # [#decoder_layer x batch_size x #bbox]
-            [
-                torch.cat(
-                    [torch.cat([i.to(hs.device), j]).unsqueeze(0) for i, j in zip(tgt_idx, ct)]
-                ).unsqueeze(0) for tgt_idx, ct in zip(tgt_indices, complementary_tensor)
-            ]
-        )
-        flatten_tgt_indices = tgt_indices.reshape(-1, max_rel_length)
-        lookup_table = torch.zeros_like(flatten_tgt_indices)
-        for i in range(flatten_tgt_indices.shape[0]):
-            lookup_table[i][flatten_tgt_indices[i]] = torch.arange(max_rel_length, device=hs.device)
-        lookup_table = lookup_table.reshape(tgt_indices.size())
-        i = [rel[:, 0] for rel in relationships]
-        j = [rel[:, 1] for rel in relationships]
-        pred_predicate_logits = []
-        for img_idx, (ii, jj) in enumerate(zip(i, j)):
-            sub_indices = lookup_table[:, img_idx, ii]
-            obj_indices = lookup_table[:, img_idx, jj]
-            delta_indices = torch.arange(0, num_decoder_layer, device=hs.device).reshape(-1, 1).repeat([1, ii.shape[0]])
-            delta_indices = delta_indices * batch_size * max_match_length + img_idx * max_match_length
-            sub_repr = aligned_flatten_hs[sub_indices + delta_indices]
-            obj_repr = aligned_flatten_hs[obj_indices + delta_indices]
-            pred_predicate_logits.append(self.predicate_emb(torch.cat([sub_repr, obj_repr], dim=-1)))
-        return {'pred_predicate_logits': pred_predicate_logits}
+            # reindex relationships
+            tgt_indices = [[single_idx[1] for single_idx in idx] for idx in indices]
+            lengths = torch.tensor([tgt_idx.shape[0] for tgt_idx in tgt_indices[0]])
+            max_rel_length = torch.max(lengths)
+            complementary_lengths = max_rel_length - lengths
+            complementary_tensor = [torch.full((length,), max_rel_length - 1, dtype=torch.int64, device=hs.device) for
+                                    length
+                                    in complementary_lengths]
+            complementary_tensor = [complementary_tensor for _ in range(len(indices))]
+            tgt_indices = torch.cat(  # [#decoder_layer x batch_size x #bbox]
+                [
+                    torch.cat(
+                        [torch.cat([i.to(hs.device), j]).unsqueeze(0) for i, j in zip(tgt_idx, ct)]
+                    ).unsqueeze(0) for tgt_idx, ct in zip(tgt_indices, complementary_tensor)
+                ]
+            )
+            flatten_tgt_indices = tgt_indices.reshape(-1, max_rel_length)
+            lookup_table = torch.zeros_like(flatten_tgt_indices)
+            for i in range(flatten_tgt_indices.shape[0]):
+                lookup_table[i][flatten_tgt_indices[i]] = torch.arange(max_rel_length, device=hs.device)
+            lookup_table = lookup_table.reshape(tgt_indices.size())
+            i = [rel[:, 0] for rel in relationships]
+            j = [rel[:, 1] for rel in relationships]
+            pred_predicate_logits = []
+            for img_idx, (ii, jj) in enumerate(zip(i, j)):
+                sub_indices = lookup_table[:, img_idx, ii]
+                obj_indices = lookup_table[:, img_idx, jj]
+                delta_indices = torch.arange(0, num_decoder_layer, device=hs.device).reshape(-1, 1).repeat(
+                    [1, ii.shape[0]])
+                delta_indices = delta_indices * batch_size * max_match_length + img_idx * max_match_length
+                sub_repr = aligned_flatten_hs[sub_indices + delta_indices]
+                obj_repr = aligned_flatten_hs[obj_indices + delta_indices]
+                pred_predicate_logits.append(self.predicate_emb(torch.cat([sub_repr, obj_repr], dim=-1)))
+                ret = {'pred_predicate_logits': pred_predicate_logits}
+        return ret
 
     def postprocess_outputs(self, out):
         if self.aux_loss:

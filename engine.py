@@ -29,7 +29,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-        outputs = model(samples)
+        outputs = model(samples) #  model.__call__(samples)
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
@@ -63,6 +63,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
+
 def train_scene_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, matcher: torch.nn.Module,
                           data_loader: Iterable, optimizer: torch.optim.Optimizer,
                           device: torch.device, epoch: int, max_norm: float = 0):
@@ -77,9 +78,9 @@ def train_scene_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, ma
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-        outputs, hs = model.forward_non_scene(samples)
+        outputs, hs = model(scene=False, samples=samples)
         indices = matcher(outputs, targets)
-        outputs.update(model.forward_scene(hs, indices, [t['relationships'] for t in targets]))
+        outputs.update(model.forward(scene=True, hs=hs, indices=indices, relationships=[t['relationships'] for t in targets]))
         outputs = model.postprocess_outputs(outputs)
         loss_dict = criterion(outputs, targets, indices)
 

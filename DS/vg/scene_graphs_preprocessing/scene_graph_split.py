@@ -41,20 +41,6 @@ train_scene_graph = {'images': train_images, 'annotations': train_annotations}
 val_scene_graph = {'images': val_images, 'annotations': val_annotations}
 test_scene_graph = {'images': test_images, 'annotations': test_annotations}
 
-result = [0,0,0,0,0]
-for id in range(len(train_annotations)):
-    if train_annotations[id]['image_id'] == 2353450:
-        result[0] = id
-    if train_annotations[id]['image_id'] == 2351427:
-        result[1] = id
-    if train_annotations[id]['image_id'] == 2343148:
-        result[2] = id
-    if train_annotations[id]['image_id'] == 2343428:
-        result[3] = id
-    if train_annotations[id]['image_id'] == 2364223:
-        result[4] = id
-import pdb
-pdb.set_trace()
 with open('../annotations/scene_graphs_train.json', 'w') as outfile:
     json.dump(train_scene_graph, outfile)
 with open('../annotations/scene_graphs_val.json', 'w') as outfile:
