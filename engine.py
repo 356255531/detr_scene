@@ -80,7 +80,7 @@ def train_scene_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, ma
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         outputs, hs = model(scene=False, samples=samples)
         indices = matcher(outputs, targets)
-        outputs = model.forward(scene=True, hs=hs, indices=indices, out=outputs, relationships=[t['relationships'] for t in targets])
+        outputs = model.forward(scene=True, out=outputs, hs=hs, indices=indices, relationships=[t['relationships'] for t in targets])
         loss_dict = criterion(outputs, targets, indices)
 
         weight_dict = criterion.weight_dict

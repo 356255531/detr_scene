@@ -17,46 +17,46 @@ from util.misc import interpolate
 def crop(image, target, region):
     cropped_image = F.crop(image, *region)
 
-    target = target.copy()
+    cropped_target = target.copy()
     i, j, h, w = region
 
     # should we do something wrt the original size?
-    target["size"] = torch.tensor([h, w])
+    cropped_target["size"] = torch.tensor([h, w])
 
     fields = ["labels", "area", "iscrowd"]
 
-    if "boxes" in target:
-        boxes = target["boxes"]
+    if "boxes" in cropped_target:
+        boxes = cropped_target["boxes"]
         max_size = torch.as_tensor([w, h], dtype=torch.float32)
         cropped_boxes = boxes - torch.as_tensor([j, i, j, i])
         cropped_boxes = torch.min(cropped_boxes.reshape(-1, 2, 2), max_size)
         cropped_boxes = cropped_boxes.clamp(min=0)
         area = (cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]).prod(dim=1)
-        target["boxes"] = cropped_boxes.reshape(-1, 4)
-        target["area"] = area
+        cropped_target["boxes"] = cropped_boxes.reshape(-1, 4)
+        cropped_target["area"] = area
         fields.append("boxes")
 
-    if "masks" in target:
+    if "masks" in cropped_target:
         # FIXME should we update the area here if there are no boxes?
-        target['masks'] = target['masks'][:, i:i + h, j:j + w]
+        cropped_target['masks'] = cropped_target['masks'][:, i:i + h, j:j + w]
         fields.append("masks")
 
     # remove elements for which the boxes or masks that have zero area
-    if "boxes" in target or "masks" in target:
+    if "boxes" in cropped_target or "masks" in cropped_target:
         # favor boxes selection when defining which elements to keep
         # this is compatible with previous implementation
-        if "boxes" in target:
-            cropped_boxes = target['boxes'].reshape(-1, 2, 2)
+        if "boxes" in cropped_target:
+            cropped_boxes = cropped_target['boxes'].reshape(-1, 2, 2)
             keep = torch.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
         else:
-            keep = target['masks'].flatten(1).any(1)
+            keep = cropped_target['masks'].flatten(1).any(1)
 
         for field in fields:
-            target[field] = target[field][keep]
+            cropped_target[field] = cropped_target[field][keep]
 
         rel = []
         rel_label = []
-        if "relationships" in target:
+        if "relationships" in cropped_target:
             # e.g., keep = torch.tensor([True, False, True]), keep.size(#bbox, 1)
             # step 1: filter out the non-exist idx, filter out the relationships including idx 1
             # For example, relationships = [[0, 1], [0, 2], [1, 2], [2, 0]] => relationships = [[0, 2], [2, 0]]
@@ -65,15 +65,15 @@ def crop(image, target, region):
             # Do some reindexing
             if len(keep) != np.sum(keep.numpy()):
                 rel_label_id = 0
-                for rel_sub,rel_ob in target['relationships']:
+                for rel_sub,rel_ob in cropped_target['relationships']:
                      if keep[rel_sub] and keep[rel_ob]:
                          rel.append([np.sum(keep[:rel_sub].numpy()), np.sum(keep[:rel_ob].numpy())])
-                         rel_label.append(target['predicate_labels'][rel_label_id].item())
+                         rel_label.append(cropped_target['predicate_labels'][rel_label_id].item())
                      rel_label_id += 1
-                target['relationships'] = torch.LongTensor(rel)
-                target['predicate_labels'] = torch.LongTensor(rel_label)
+                cropped_target['relationships'] = torch.LongTensor(rel)
+                cropped_target['predicate_labels'] = torch.LongTensor(rel_label)
 
-    return cropped_image, target
+    return cropped_image, cropped_target
 
 
 def hflip(image, target):
@@ -165,13 +165,21 @@ def pad(image, target, padding):
     return padded_image, target
 
 
+def relation_safe_crop(img, size, target):
+    region = T.RandomCrop.get_params(img, size)
+    cropped_img, cropped_target = crop(img, target, region)
+    while 'relationships' in cropped_target and (cropped_target['relationships'].shape[0] == 0 or cropped_target['relationships'].shape[1] == 0):
+        region = T.RandomCrop.get_params(img, size)
+        cropped_img, cropped_target = crop(img, target, region)
+    return cropped_img, cropped_target
+
+
 class RandomCrop(object):
     def __init__(self, size):
         self.size = size
 
     def __call__(self, img, target):
-        region = T.RandomCrop.get_params(img, self.size)
-        return crop(img, target, region)
+        return relation_safe_crop(img, self.size, target)
 
 
 class RandomSizeCrop(object):
@@ -182,8 +190,7 @@ class RandomSizeCrop(object):
     def __call__(self, img: PIL.Image.Image, target: dict):
         w = random.randint(self.min_size, min(img.width, self.max_size))
         h = random.randint(self.min_size, min(img.height, self.max_size))
-        region = T.RandomCrop.get_params(img, [h, w])
-        return crop(img, target, region)
+        return relation_safe_crop(img, [h, w], target)
 
 
 class CenterCrop(object):

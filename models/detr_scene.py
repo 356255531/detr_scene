@@ -46,7 +46,7 @@ class DETRScene(nn.Module):
         self.num_queries = num_queries
         self.hidden_dim = hidden_dim
 
-    def forward(self, scene=False, samples: NestedTensor=None, hs=None, indices=None, out=None, relationships=None):
+    def forward(self, scene=False, samples: NestedTensor=None, out=None, hs=None, indices=None, relationships=None):
         if not scene:
             if isinstance(samples, (list, torch.Tensor)):
                 samples = nested_tensor_from_tensor_list(samples)
@@ -132,7 +132,6 @@ class DETRScene(nn.Module):
                                                         [_[:-1] for _ in out['pred_predicate_logits']])
             out['pred_logits'], out['pred_boxes'] = out['pred_logits'][-1], out['pred_boxes'][-1]
             out['pred_predicate_logits'] = [_[-1] for _ in out['pred_predicate_logits']]
-
             ret = out
         return ret
 
@@ -194,6 +193,7 @@ class SetCriterion(nn.Module):
         empty_weight_predicate_labels[-1] = self.predicate_eos_coef
         self.register_buffer('empty_weight_labels', empty_weight_labels)
         self.register_buffer('empty_weight_predicate_labels', empty_weight_predicate_labels)
+
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
@@ -206,8 +206,8 @@ class SetCriterion(nn.Module):
         target_classes = torch.full(src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
 
-        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight_labels)
-        losses = {'loss_ce': loss_ce}
+        loss_obj_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight_labels)
+        losses = {'loss_obj_ce': loss_obj_ce}
 
         if log:
             # TODO this should probably be a separate loss, not hacked in this one here
