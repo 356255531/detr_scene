@@ -36,133 +36,59 @@ class DETRScene(nn.Module):
         hidden_dim = transformer.d_model
         self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
-        self.predicate_emb = nn.Linear(2 * hidden_dim, num_predicate_classes)
-        self.query_embed = nn.Embedding(num_queries + 1, hidden_dim)
+        self.predicate_class_embed = nn.Linear(2 * hidden_dim, num_predicate_classes)
+        self.query_embed = nn.Embedding(num_queries, hidden_dim)
         self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
         self.backbone = backbone
         self.aux_loss = aux_loss
 
         self.num_classes = num_classes
-        self.num_queries = num_queries
-        self.hidden_dim = hidden_dim
 
-    def forward(self, scene=False, samples: NestedTensor=None, out=None, hs=None, indices=None, relationships=None):
-        if not scene:
-            if isinstance(samples, (list, torch.Tensor)):
-                samples = nested_tensor_from_tensor_list(samples)
-            features, pos = self.backbone(samples)
+    def forward(self, samples: NestedTensor):
+        """ The forward expects a NestedTensor, which consists of:
+               - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
+               - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
 
-            src, mask = features[-1].decompose()
-            assert mask is not None
-            hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[0]
+            It returns a dict with the following elements:
+               - "pred_logits": the classification logits (including no-object) for all queries.
+                                Shape= [batch_size x num_queries x (num_classes + 1)]
+               - "pred_boxes": The normalized boxes coordinates for all queries, represented as
+                               (center_x, center_y, height, width). These values are normalized in [0, 1],
+                               relative to the size of each individual image (disregarding possible padding).
+                               See PostProcess for information on how to retrieve the unnormalized bounding box.
+               - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
+                                dictionnaries containing the two above keys for each decoder layer.
+        """
+        if isinstance(samples, (list, torch.Tensor)):
+            samples = nested_tensor_from_tensor_list(samples)
+        features, pos = self.backbone(samples)
 
-            outputs_class = self.class_embed(hs)
-            outputs_coord = self.bbox_embed(hs).sigmoid()
+        src, mask = features[-1].decompose()
+        assert mask is not None
+        hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[0]
+        predicate_hs = torch.cat(
+            [
+                hs.repeat_interleave(self.num_classes, dim=-2),
+                hs.repeat(1, 1, self.num_classes, 1)
+            ],
+            dim=-1
+        )
 
-            out = {'pred_logits': outputs_class, 'pred_boxes': outputs_coord}
-            ret = out, hs
-        else:
-            hs_size = hs.size()  # [#decoder_layer x batch_size x #bbox x #hidden]
-            num_decoder_layer = hs_size[0]  # 6
-            batch_size = hs_size[1]  # 2
-            num_queries = hs_size[2]  # 101
-            hidden_dim = hs_size[3]  # 256
-
-            # Align indices
-            src_indices = [[single_idx[0] for single_idx in idx] for idx in indices]
-            lengths = torch.tensor([src_idx.shape[0] for src_idx in src_indices[0]])
-            max_match_length = torch.max(lengths)
-            complementary_lengths = max_match_length - lengths
-            complementary_tensor = [torch.full((length,), num_queries - 1, dtype=torch.int64, device=hs.device) for
-                                    length in complementary_lengths]
-            complementary_tensor = [complementary_tensor for _ in range(len(indices))]
-            src_indices = torch.cat(  # [#decoder_layer x batch_size x #bbox]
-                [
-                    torch.cat(
-                        [torch.cat([i.to(hs.device), j]).unsqueeze(0) for i, j in zip(src_idx, ct)]
-                    ).unsqueeze(0) for src_idx, ct in zip(src_indices, complementary_tensor)
-                ]
-            )
-
-            # reindex hs
-            flatten_hs = hs.reshape(-1, hidden_dim)
-            flatten_src_indices = src_indices.reshape(-1, max_match_length)
-            delta_indices = torch.arange(0, num_decoder_layer * batch_size, device=hs.device).reshape(-1, 1)
-            delta_indices = delta_indices.repeat([1, max_match_length]) * (self.num_queries + 1)
-            aligned_flatten_hs = flatten_hs[(flatten_src_indices + delta_indices).reshape(
-                -1)]  # [(max_box_per_image * batch_size * #decode_layer) x hidden_dim]
-
-            # reindex relationships
-            tgt_indices = [[single_idx[1] for single_idx in idx] for idx in indices]
-            lengths = torch.tensor([tgt_idx.shape[0] for tgt_idx in tgt_indices[0]])
-            max_rel_length = torch.max(lengths)
-            complementary_lengths = max_rel_length - lengths
-            complementary_tensor = [torch.full((length,), max_rel_length - 1, dtype=torch.int64, device=hs.device) for
-                                    length
-                                    in complementary_lengths]
-            complementary_tensor = [complementary_tensor for _ in range(len(indices))]
-            tgt_indices = torch.cat(  # [#decoder_layer x batch_size x #bbox]
-                [
-                    torch.cat(
-                        [torch.cat([i.to(hs.device), j]).unsqueeze(0) for i, j in zip(tgt_idx, ct)]
-                    ).unsqueeze(0) for tgt_idx, ct in zip(tgt_indices, complementary_tensor)
-                ]
-            )
-            flatten_tgt_indices = tgt_indices.reshape(-1, max_rel_length)
-            lookup_table = torch.zeros_like(flatten_tgt_indices)
-            for i in range(flatten_tgt_indices.shape[0]):
-                lookup_table[i][flatten_tgt_indices[i]] = torch.arange(max_rel_length, device=hs.device)
-            lookup_table = lookup_table.reshape(tgt_indices.size())
-            i = [rel[:, 0] for rel in relationships]
-            j = [rel[:, 1] for rel in relationships]
-            pred_predicate_logits = []
-            for img_idx, (ii, jj) in enumerate(zip(i, j)):
-                sub_indices = lookup_table[:, img_idx, ii]
-                obj_indices = lookup_table[:, img_idx, jj]
-                delta_indices = torch.arange(0, num_decoder_layer, device=hs.device).reshape(-1, 1).repeat(
-                    [1, ii.shape[0]])
-                delta_indices = delta_indices * batch_size * max_match_length + img_idx * max_match_length
-                sub_repr = aligned_flatten_hs[sub_indices + delta_indices]
-                obj_repr = aligned_flatten_hs[obj_indices + delta_indices]
-                pred_predicate_logits.append(self.predicate_emb(torch.cat([sub_repr, obj_repr], dim=-1)))
-            out['pred_predicate_logits'] = pred_predicate_logits
-
-            if self.aux_loss:
-                out['aux_outputs'] = self._set_aux_loss(out['pred_logits'], out['pred_boxes'],
-                                                        [_[:-1] for _ in out['pred_predicate_logits']])
-            out['pred_logits'], out['pred_boxes'] = out['pred_logits'][-1], out['pred_boxes'][-1]
-            out['pred_predicate_logits'] = [_[-1] for _ in out['pred_predicate_logits']]
-            ret = out
-        return ret
+        outputs_class = self.class_embed(hs)
+        outputs_predicate_class = self.predicate_class_embed(predicate_hs)
+        outputs_coord = self.bbox_embed(hs).sigmoid()
+        out = {'pred_logits': outputs_class[-1], 'pred_predicate_logits': outputs_predicate_class[-1], 'pred_boxes': outputs_coord[-1]}
+        if self.aux_loss:
+            out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_predicate_class, outputs_coord)
+        return out
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord, outpus_predicate_class):
+    def _set_aux_loss(self, outputs_class, outpus_predicate_class, outputs_coord, ):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        aux_outputs = []
-        for i in range(outputs_class.shape[0] - 1):
-            aux_output = {}
-            aux_output['pred_logits'] = outputs_class[i]
-            aux_output['pred_boxes'] = outputs_coord[i]
-            aux_output['pred_predicate_logits'] = [predicate_class[i] for predicate_class in  outpus_predicate_class]
-            aux_outputs.append(aux_output)
-        return aux_outputs
-
-    # @torch.jit.unused
-    # def _set_aux_loss(self, outputs_class, outputs_coord, outputs_predicate):
-    #     # this is a workaround to make torchscript happy, as torchscript
-    #     # doesn't support dictionary with non-homogeneous values, such
-    #     # as a dict having both a Tensor and a list.
-    #     aux_outputs = []
-    #     for idx, (a, b) in enumerate(zip(outputs_class[:-1], outputs_coord[:-1])):
-    #         c = [_[idx] for _ in outputs_predicate]
-    #         aux_outputs.append({'pred_logits': a, 'pred_boxes': b, 'pred_predicate_logits': c})
-    #     return aux_outputs
-
-
-def is_dist_avail_and_initiaSetCriterionlized():
-    pass
+        return [{'pred_logits': a, 'pred_predicate_logits': b, 'pred_boxes': c}
+                for a, b, c in zip(outputs_class[:-1], outpus_predicate_class[:-1], outputs_coord[:-1])]
 
 
 class SetCriterion(nn.Module):
@@ -171,7 +97,7 @@ class SetCriterion(nn.Module):
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
-    def __init__(self, num_classes, num_predicate_classes, weight_dict, eos_coef, predicate_eos_coef, losses):
+    def __init__(self, num_classes, num_predicate_classes, matcher, weight_dict, eos_coef, losses):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -182,17 +108,14 @@ class SetCriterion(nn.Module):
         """
         super().__init__()
         self.num_classes = num_classes
+        self.matcher = matcher
         self.num_predicate_classes = num_predicate_classes
         self.weight_dict = weight_dict
         self.eos_coef = eos_coef
-        self.predicate_eos_coef = predicate_eos_coef
         self.losses = losses
-        empty_weight_labels = torch.ones(self.num_classes + 1)
-        empty_weight_predicate_labels = torch.ones(self.num_predicate_classes)
-        empty_weight_labels[-1] = self.eos_coef
-        empty_weight_predicate_labels[-1] = self.predicate_eos_coef
-        self.register_buffer('empty_weight_labels', empty_weight_labels)
-        self.register_buffer('empty_weight_predicate_labels', empty_weight_predicate_labels)
+        empty_weight = torch.ones(self.num_classes + 1)
+        empty_weight[-1] = self.eos_coef
+        self.register_buffer('empty_weight', empty_weight)
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (NLL)
@@ -203,11 +126,12 @@ class SetCriterion(nn.Module):
 
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
-        target_classes = torch.full(src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device)
+        target_classes = torch.full(src_logits.shape[:2], self.num_classes,
+                                    dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
 
-        loss_obj_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight_labels)
-        losses = {'loss_obj_ce': loss_obj_ce}
+        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
+        losses = {'loss_obj_ce': loss_ce}
 
         if log:
             # TODO this should probably be a separate loss, not hacked in this one here
@@ -219,9 +143,24 @@ class SetCriterion(nn.Module):
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
         assert 'pred_predicate_logits' in outputs
-        src_predicate_logits = torch.cat(outputs['pred_predicate_logits'])
+
+        indices_lookup_dicts = []
+        for src_indices, tgt_indices in indices:
+            indices_lookup_dict = torch.zeros_like(src_indices)
+            indices_lookup_dict[tgt_indices] = src_indices
+            indices_lookup_dicts.append(indices_lookup_dict)
+        tgt_relationships = [t['relationships'] for t in targets]
+        tgt_relationships = [
+            indices_lookup_dict[rel.reshape(-1)].reshape(rel.size())
+            for indices_lookup_dict, rel in zip(indices_lookup_dicts, tgt_relationships)
+        ]
+        tgt_indices = [rel[:, 0] * self.num_classes + rel[:, 1] for rel in tgt_relationships]
+        src_predicate_logits = torch.cat(
+            [outputs['pred_predicate_logits'][indices_idx][indices] for indices_idx, indices in enumerate(tgt_indices)],
+            dim=0
+        )
         target_classes = torch.cat([t['predicate_labels'] for t in targets])
-        loss_predicate_ce = F.cross_entropy(src_predicate_logits, target_classes, self.empty_weight_predicate_labels)
+        loss_predicate_ce = F.cross_entropy(src_predicate_logits, target_classes)
         losses = {'loss_predicate_ce': loss_predicate_ce}
 
         if log:
@@ -316,28 +255,34 @@ class SetCriterion(nn.Module):
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
-    def forward(self, outputs, targets, indices):
+    def forward(self, outputs, targets):
         """ This performs the loss computation.
         Parameters:
              outputs: dict of tensors, see the output specification of the model for the format
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
+        outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
+
+        # Retrieve the matching between the outputs of the last layer and the targets
+        indices = self.matcher(outputs_without_aux, targets)
+
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
         num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
-        if is_dist_avail_and_initiaSetCriterionlized():
+        if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_boxes)
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
 
         # Compute all the requested losses
         losses = {}
         for loss in self.losses:
-            losses.update(self.get_loss(loss, outputs, targets, indices[-1], num_boxes))
+            losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
+                indices = self.matcher(aux_outputs, targets)
                 for loss in self.losses:
                     if loss == 'masks':
                         # Intermediate masks losses are too costly to compute, we ignore them.
@@ -346,7 +291,7 @@ class SetCriterion(nn.Module):
                     if loss == 'labels':
                         # Logging is enabled only for the last layer
                         kwargs = {'log': False}
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices[i], num_boxes, **kwargs)
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
                     l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
@@ -431,7 +376,6 @@ def build(args):
     if args.masks:
         model = DETRsegm(model, freeze_detr=(args.frozen_weights is not None))
     matcher = build_matcher(args)
-    matcher.to(device)
     weight_dict = {'loss_predicate_ce': args.predicate_loss_coef, 'loss_obj_ce': args.obj_loss_coef, 'loss_bbox': args.bbox_loss_coef,
                    'loss_giou': args.giou_loss_coef}
     if args.masks:
@@ -447,8 +391,9 @@ def build(args):
     losses = ['labels', 'boxes', 'cardinality', 'predicate_labels']
     if args.masks:
         losses += ["masks"]
-    criterion = SetCriterion(num_classes, num_predicate_classes=num_predicate_classes, weight_dict=weight_dict,
-                             eos_coef=args.eos_coef, predicate_eos_coef=args.predicate_eos_coef, losses=losses)
+    criterion = SetCriterion(num_classes, num_predicate_classes,
+                             matcher=matcher, weight_dict=weight_dict,
+                             eos_coef=args.eos_coef, losses=losses)
     criterion.to(device)
     postprocessors = {'bbox': PostProcess()}
     if args.masks:
@@ -457,4 +402,4 @@ def build(args):
             is_thing_map = {i: i <= 90 for i in range(201)}
             postprocessors["panoptic"] = PostProcessPanoptic(is_thing_map, threshold=0.85)
 
-    return model, criterion, matcher, postprocessors
+    return model, criterion, postprocessors
