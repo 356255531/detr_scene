@@ -8,7 +8,6 @@ import PIL
 import torch
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
-import numpy as np
 
 from util.box_ops import box_xyxy_to_cxcywh
 from util.misc import interpolate
@@ -54,24 +53,17 @@ def crop(image, target, region):
         for field in fields:
             cropped_target[field] = cropped_target[field][keep]
 
-        rel = []
-        rel_label = []
         if "relationships" in cropped_target:
-            # e.g., keep = torch.tensor([True, False, True]), keep.size(#bbox, 1)
-            # step 1: filter out the non-exist idx, filter out the relationships including idx 1
-            # For example, relationships = [[0, 1], [0, 2], [1, 2], [2, 0]] => relationships = [[0, 2], [2, 0]]
-            # Step 2: find a lookup dictionary {old_idx: new_idx}
-            # reindex relationships using lookup dictionary => relationships = [[0, 1], [1, 0]]
-            # Do some reindexing
-            if len(keep) != np.sum(keep.numpy()):
-                rel_label_id = 0
-                for rel_sub,rel_ob in cropped_target['relationships']:
-                     if keep[rel_sub] and keep[rel_ob]:
-                         rel.append([np.sum(keep[:rel_sub].numpy()), np.sum(keep[:rel_ob].numpy())])
-                         rel_label.append(cropped_target['predicate_labels'][rel_label_id].item())
-                     rel_label_id += 1
-                cropped_target['relationships'] = torch.LongTensor(rel)
-                cropped_target['predicate_labels'] = torch.LongTensor(rel_label)
+            if (keep == 0).sum().item() > 0:
+                relationships = cropped_target['relationships']
+
+                predicate_keep = torch.logical_and(keep[relationships[:, 0]], keep[relationships[:, 1]])
+                cropped_target['predicate_labels'] = cropped_target['predicate_labels'][predicate_keep]
+
+                kept_relationships = relationships[predicate_keep]
+                lookup_table = torch.zeros_like(keep, dtype=torch.long)
+                lookup_table[torch.where(keep)] = torch.arange(keep.sum().item())
+                cropped_target['relationships'] = lookup_table[kept_relationships.reshape(-1)].reshape(kept_relationships.size())
 
     return cropped_image, cropped_target
 
