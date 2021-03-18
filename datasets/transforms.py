@@ -76,11 +76,12 @@ def reduce_bbox(image, target, num_bbox):
     fields = ["labels", "iscrowd", "boxes"]
     if "boxes" in target_cpy:
         boxes = target_cpy['boxes']
-        if "relationships" in target_cpy and boxes.shape[0] > num_bbox:
+        if boxes.shape[0] > num_bbox:
             keep = torch.zeros((boxes.shape[0],), dtype=torch.bool)
             keep_idx = np.arange(0, boxes.shape[0])
             shuffle(keep_idx)
             keep[keep_idx[:num_bbox]] = True
+
             for field in fields:
                 target_cpy[field] = target_cpy[field][keep]
             if "area" in target_cpy:
@@ -88,16 +89,17 @@ def reduce_bbox(image, target, num_bbox):
             if "mask" in target_cpy:
                 target_cpy["mask"] = target_cpy["mask"][keep]
 
-            relationships = target_cpy['relationships']
+            if "relationships" in target_cpy:
+                relationships = target_cpy['relationships']
 
-            predicate_keep = torch.logical_and(keep[relationships[:, 0]], keep[relationships[:, 1]])
-            target_cpy['predicate_labels'] = target_cpy['predicate_labels'][predicate_keep]
+                predicate_keep = torch.logical_and(keep[relationships[:, 0]], keep[relationships[:, 1]])
+                target_cpy['predicate_labels'] = target_cpy['predicate_labels'][predicate_keep]
 
-            kept_relationships = relationships[predicate_keep]
-            lookup_table = torch.zeros_like(keep, dtype=torch.long)
-            lookup_table[torch.where(keep)] = torch.arange(keep.sum().item())
-            target_cpy['relationships'] = lookup_table[kept_relationships.reshape(-1)].reshape(
-                kept_relationships.size())
+                kept_relationships = relationships[predicate_keep]
+                lookup_table = torch.zeros_like(keep, dtype=torch.long)
+                lookup_table[torch.where(keep)] = torch.arange(keep.sum().item())
+                target_cpy['relationships'] = lookup_table[kept_relationships.reshape(-1)].reshape(
+                    kept_relationships.size())
 
     return image, target_cpy
 
@@ -195,8 +197,8 @@ def relation_safe_crop(img, size, target):
     region = T.RandomCrop.get_params(img, size)
     cropped_img, cropped_target = crop(img, target, region)
     counter = 0
-    while 'relationships' in cropped_target and (cropped_target['relationships'].shape[0] == 0 or cropped_target['relationships'].shape[1] == 0):
-        if counter > 10:
+    while 'relationships' in cropped_target and cropped_target['relationships'].shape[0] == 0:
+        if counter > 9:
             return img, target
         region = T.RandomCrop.get_params(img, size)
         cropped_img, cropped_target = crop(img, target, region)

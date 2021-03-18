@@ -36,7 +36,7 @@ class DETRScene(nn.Module):
         hidden_dim = transformer.d_model
         self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
-        self.predicate_class_embed = nn.Linear(2 * hidden_dim, num_predicate_classes)
+        self.predicate_class_embed = nn.Linear(2 * hidden_dim, num_predicate_classes + 1)
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
         self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
         self.backbone = backbone
@@ -95,7 +95,11 @@ class SetCriterion(nn.Module):
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
-    def __init__(self, num_classes, num_predicate_classes, num_queries,matcher, weight_dict, eos_coef, losses):
+    def __init__(self,
+                 num_classes, num_predicate_classes,
+                 num_queries, matcher, weight_dict,
+                 label_eos_coef, predicate_label_eos_coef,
+                 losses):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -110,11 +114,15 @@ class SetCriterion(nn.Module):
         self.num_queries = num_queries
         self.matcher = matcher
         self.weight_dict = weight_dict
-        self.eos_coef = eos_coef
+        self.label_eos_coef = label_eos_coef
+        self.predicate_label_eos_coef = predicate_label_eos_coef
         self.losses = losses
-        empty_weight = torch.ones(self.num_classes + 1)
-        empty_weight[-1] = self.eos_coef
-        self.register_buffer('empty_weight', empty_weight)
+        label_empty_weight = torch.ones(self.num_classes + 1)
+        label_empty_weight[-1] = self.label_eos_coef
+        self.register_buffer('label_empty_weight', label_empty_weight)
+        predicate_label_empty_weight = torch.ones(self.num_predicate_classes + 1)
+        predicate_label_empty_weight[-1] = self.predicate_label_eos_coef
+        self.register_buffer('predicate_label_empty_weight', predicate_label_empty_weight)
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (NLL)
@@ -129,7 +137,7 @@ class SetCriterion(nn.Module):
                                     dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
 
-        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
+        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.label_empty_weight)
         losses = {'loss_obj_ce': loss_ce}
 
         if log:
@@ -142,6 +150,13 @@ class SetCriterion(nn.Module):
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
         assert 'pred_predicate_logits' in outputs
+        src_predicate_logits = outputs['pred_predicate_logits']
+        target_classes = torch.full(
+            src_predicate_logits.shape[:2],
+            self.num_predicate_classes,
+            dtype=torch.int64, device=src_predicate_logits.device
+        )
+        target_classes_o = [t['predicate_labels'] for t in targets]
 
         indices_lookup_dicts = []
         for src_indices, tgt_indices in indices:
@@ -149,26 +164,29 @@ class SetCriterion(nn.Module):
             indices_lookup_dict[tgt_indices] = src_indices
             indices_lookup_dicts.append(indices_lookup_dict)
         tgt_relationships = [t['relationships'] for t in targets]
-        tgt_relationships = [
+        src_relationships = [
             indices_lookup_dict[rel.reshape(-1)].reshape(rel.size())
             for indices_lookup_dict, rel in zip(indices_lookup_dicts, tgt_relationships)
         ]
-        tgt_indices = [rel[:, 0] * self.num_queries + rel[:, 1] for rel in tgt_relationships]
-        src_predicate_logits = torch.cat(
-            [outputs['pred_predicate_logits'][indices_idx][indices] for indices_idx, indices in enumerate(tgt_indices)],
-            dim=0
-        )
-        target_classes = torch.cat([t['predicate_labels'] for t in targets])
-        loss_predicate_ce = F.cross_entropy(src_predicate_logits, target_classes)
+        src_indices = [rel[:, 0] * self.num_queries + rel[:, 1] for rel in src_relationships]
+
+        for idx, (src_idx, predicate_labels) in enumerate(zip(src_indices, target_classes_o)):
+            target_classes[idx, src_idx] = predicate_labels
+
+        loss_predicate_ce = F.cross_entropy(src_predicate_logits.transpose(1, 2), target_classes, self.predicate_label_empty_weight)
         losses = {'loss_predicate_ce': loss_predicate_ce}
 
         if log:
             # TODO this should probably be a separate loss, not hacked in this one here
-            losses['predicate_class_error'] = 100 - accuracy(src_predicate_logits, target_classes)[0]
+            selected_src_predicate_logits = torch.cat(
+                [predicate_logits[src_indices] for predicate_logits, src_idx in zip(src_predicate_logits, src_indices)],
+                dim=0
+            )
+            losses['predicate_class_error'] = 100 - accuracy(selected_src_predicate_logits, torch.cat(target_classes_o, dim=-1))[0]
         return losses
 
     @torch.no_grad()
-    def loss_cardinality(self, outputs, targets, indices, num_boxes):
+    def loss_label_cardinality(self, outputs, targets, indices, num_boxes):
         """ Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
         This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients
         """
@@ -178,7 +196,21 @@ class SetCriterion(nn.Module):
         # Count the number of predictions that are NOT "no-object" (which is the last class)
         card_pred = (pred_logits.argmax(-1) != pred_logits.shape[-1] - 1).sum(1)
         card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
-        losses = {'cardinality_error': card_err}
+        losses = {'label_cardinality_error': card_err}
+        return losses
+
+    @torch.no_grad()
+    def loss_predicate_label_cardinality(self, outputs, targets, indices, num_boxes):
+        """ Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
+        This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients
+        """
+        pred_predicate_logits = outputs['pred_predicate_logits']
+        device = pred_predicate_logits.device
+        tgt_lengths = torch.as_tensor([len(v["predicate_labels"]) for v in targets], device=device)
+        # Count the number of predictions that are NOT "no-object" (which is the last class)
+        card_pred = (pred_predicate_logits.argmax(-1) != pred_predicate_logits.shape[-1] - 1).sum(1)
+        card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
+        losses = {'predicate_label_cardinality_error': card_err}
         return losses
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
@@ -247,7 +279,8 @@ class SetCriterion(nn.Module):
         loss_map = {
             'labels': self.loss_labels,
             'predicate_labels': self.loss_predicate_labels,
-            'cardinality': self.loss_cardinality,
+            'label_cardinality': self.loss_label_cardinality,
+            'predicate_label_cardinality': self.loss_predicate_label_cardinality,
             'boxes': self.loss_boxes,
             'masks': self.loss_masks
         }
@@ -353,9 +386,10 @@ def build(args):
     # For more details on this, check the following discussion
     # https://github.com/facebookresearch/detr/issues/108#issuecomment-650269223
     # We follow the most scene graph papers and use the setting #object = 150 and #predicates = 50
-    num_classes = 150
-    num_predicate_classes = 50
     if args.dataset_file[:2] == 'vg':
+        num_classes = 150
+        num_predicate_classes = 50
+    else:
         num_classes = 150
         num_predicate_classes = 50
     device = torch.device(args.device)
@@ -375,7 +409,9 @@ def build(args):
     if args.masks:
         model = DETRsegm(model, freeze_detr=(args.frozen_weights is not None))
     matcher = build_matcher(args)
-    weight_dict = {'loss_predicate_ce': args.predicate_loss_coef, 'loss_obj_ce': args.obj_loss_coef, 'loss_bbox': args.bbox_loss_coef,
+    weight_dict = {'loss_predicate_ce': args.predicate_loss_coef,
+                   'loss_obj_ce': args.obj_loss_coef,
+                   'loss_bbox': args.bbox_loss_coef,
                    'loss_giou': args.giou_loss_coef}
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
@@ -387,12 +423,15 @@ def build(args):
             aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
 
-    losses = ['labels', 'boxes', 'cardinality', 'predicate_labels']
+    losses = ['labels', 'boxes', 'label_cardinality', 'predicate_label_cardinality',
+              'predicate_labels']
     if args.masks:
         losses += ["masks"]
     criterion = SetCriterion(num_classes, num_predicate_classes, num_queries=args.num_queries,
                              matcher=matcher, weight_dict=weight_dict,
-                             eos_coef=args.eos_coef, losses=losses)
+                             label_eos_coef=args.label_eos_coef,
+                             predicate_label_eos_coef=args.predicate_label_eos_coef,
+                             losses=losses)
     criterion.to(device)
     postprocessors = {'bbox': PostProcess()}
     if args.masks:
