@@ -42,8 +42,6 @@ class DETRScene(nn.Module):
         self.backbone = backbone
         self.aux_loss = aux_loss
 
-        self.num_classes = num_classes
-
     def forward(self, samples: NestedTensor):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
@@ -68,8 +66,8 @@ class DETRScene(nn.Module):
         hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[0]
         predicate_hs = torch.cat(
             [
-                hs.repeat_interleave(self.num_classes, dim=-2),
-                hs.repeat(1, 1, self.num_classes, 1)
+                hs.repeat_interleave(self.num_queries, dim=-2),
+                hs.repeat(1, 1, self.num_queries, 1)
             ],
             dim=-1
         )
@@ -83,7 +81,7 @@ class DETRScene(nn.Module):
         return out
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outpus_predicate_class, outputs_coord, ):
+    def _set_aux_loss(self, outputs_class, outpus_predicate_class, outputs_coord):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
@@ -97,7 +95,7 @@ class SetCriterion(nn.Module):
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
-    def __init__(self, num_classes, num_predicate_classes, matcher, weight_dict, eos_coef, losses):
+    def __init__(self, num_classes, num_predicate_classes, num_queries,matcher, weight_dict, eos_coef, losses):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -108,8 +106,9 @@ class SetCriterion(nn.Module):
         """
         super().__init__()
         self.num_classes = num_classes
-        self.matcher = matcher
         self.num_predicate_classes = num_predicate_classes
+        self.num_queries = num_queries
+        self.matcher = matcher
         self.weight_dict = weight_dict
         self.eos_coef = eos_coef
         self.losses = losses
@@ -154,7 +153,7 @@ class SetCriterion(nn.Module):
             indices_lookup_dict[rel.reshape(-1)].reshape(rel.size())
             for indices_lookup_dict, rel in zip(indices_lookup_dicts, tgt_relationships)
         ]
-        tgt_indices = [rel[:, 0] * self.num_classes + rel[:, 1] for rel in tgt_relationships]
+        tgt_indices = [rel[:, 0] * self.num_queries + rel[:, 1] for rel in tgt_relationships]
         src_predicate_logits = torch.cat(
             [outputs['pred_predicate_logits'][indices_idx][indices] for indices_idx, indices in enumerate(tgt_indices)],
             dim=0
@@ -391,7 +390,7 @@ def build(args):
     losses = ['labels', 'boxes', 'cardinality', 'predicate_labels']
     if args.masks:
         losses += ["masks"]
-    criterion = SetCriterion(num_classes, num_predicate_classes,
+    criterion = SetCriterion(num_classes, num_predicate_classes, num_queries=args.num_queries,
                              matcher=matcher, weight_dict=weight_dict,
                              eos_coef=args.eos_coef, losses=losses)
     criterion.to(device)

@@ -133,6 +133,7 @@ def make_coco_transforms(image_set):
                 ])
             ),
             normalize,
+            T.ReduceBox(100),
         ])
 
     if image_set == 'val':

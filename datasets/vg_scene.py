@@ -25,8 +25,6 @@ class VGScene(VGDetection):
         img, target = prepare_vg(img, target)
         if self._transforms is not None:
             img, target = self._transforms(img, target)
-            if len(target['relationships']) == 0:
-                return None
         return img, target
 
 
@@ -75,4 +73,5 @@ def build(image_set, args):
 
     img_folder, ann_file = PATHS[image_set]
     dataset = VGScene(img_folder, ann_file, transforms=make_coco_transforms(image_set))
+
     return dataset

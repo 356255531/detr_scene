@@ -266,7 +266,6 @@ def get_sha():
 
 
 def collate_fn(batch):
-    batch = filter(lambda img: img is not None, batch)
     batch = list(zip(*batch))
     batch[0] = nested_tensor_from_tensor_list(batch[0])
     return tuple(batch)

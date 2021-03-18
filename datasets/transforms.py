@@ -9,6 +9,9 @@ import torch
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
 
+from random import shuffle
+import numpy as np
+
 from util.box_ops import box_xyxy_to_cxcywh
 from util.misc import interpolate
 
@@ -66,6 +69,37 @@ def crop(image, target, region):
                 cropped_target['relationships'] = lookup_table[kept_relationships.reshape(-1)].reshape(kept_relationships.size())
 
     return cropped_image, cropped_target
+
+
+def reduce_bbox(image, target, num_bbox):
+    target_cpy = target.copy()
+    fields = ["labels", "iscrowd", "boxes"]
+    if "boxes" in target_cpy:
+        boxes = target_cpy['boxes']
+        if "relationships" in target_cpy and boxes.shape[0] > num_bbox:
+            keep = torch.zeros((boxes.shape[0],), dtype=torch.bool)
+            keep_idx = np.arange(0, boxes.shape[0])
+            shuffle(keep_idx)
+            keep[keep_idx[:num_bbox]] = True
+            for field in fields:
+                target_cpy[field] = target_cpy[field][keep]
+            if "area" in target_cpy:
+                target_cpy["area"] = target_cpy["area"][keep]
+            if "mask" in target_cpy:
+                target_cpy["mask"] = target_cpy["mask"][keep]
+
+            relationships = target_cpy['relationships']
+
+            predicate_keep = torch.logical_and(keep[relationships[:, 0]], keep[relationships[:, 1]])
+            target_cpy['predicate_labels'] = target_cpy['predicate_labels'][predicate_keep]
+
+            kept_relationships = relationships[predicate_keep]
+            lookup_table = torch.zeros_like(keep, dtype=torch.long)
+            lookup_table[torch.where(keep)] = torch.arange(keep.sum().item())
+            target_cpy['relationships'] = lookup_table[kept_relationships.reshape(-1)].reshape(
+                kept_relationships.size())
+
+    return image, target_cpy
 
 
 def hflip(image, target):
@@ -160,9 +194,13 @@ def pad(image, target, padding):
 def relation_safe_crop(img, size, target):
     region = T.RandomCrop.get_params(img, size)
     cropped_img, cropped_target = crop(img, target, region)
+    counter = 0
     while 'relationships' in cropped_target and (cropped_target['relationships'].shape[0] == 0 or cropped_target['relationships'].shape[1] == 0):
+        if counter > 10:
+            return img, target
         region = T.RandomCrop.get_params(img, size)
         cropped_img, cropped_target = crop(img, target, region)
+        counter += 1
     return cropped_img, cropped_target
 
 
@@ -205,6 +243,14 @@ class RandomHorizontalFlip(object):
         if random.random() < self.p:
             return hflip(img, target)
         return img, target
+
+
+class ReduceBox(object):
+    def __init__(self, num_bbox=100):
+        self.num_bbox = num_bbox
+
+    def __call__(self, img, target):
+        return reduce_bbox(img, target, self.num_bbox)
 
 
 class RandomResize(object):
