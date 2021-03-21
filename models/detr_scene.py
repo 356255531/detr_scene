@@ -360,6 +360,30 @@ class PostProcess(nn.Module):
 
         return results
 
+class sg_PostProcess(nn.Module):
+    """ This module converts the model's output into the format expected by the coco api"""
+    @torch.no_grad()
+    def forward(self, outputs):
+        """ Perform the computation
+        Parameters:
+            outputs: raw outputs of the model
+            target_sizes: tensor of dimension [batch_size x 2] containing the size of each images of the batch
+                          For evaluation, this must be the original image size (before any data augmentation)
+                          For visualization, this should be the image size after data augment, but before padding
+        """
+        out_class_logits, boxes, out_pred_logits= outputs['pred_logits'], outputs['pred_boxes'], outputs['pred_predicate_logits']
+
+        prob = F.softmax(out_class_logits, -1)
+        class_scores, class_labels = prob[..., :-1].max(-1)
+
+        prob = F.softmax(out_pred_logits, -1)
+        pred_scores, pred_labels = prob[..., :-1].max(-1)
+
+
+        results = [{'classification scores': s, 'classification labels': l, 'boxes': b, 'predicate scores': ps, 'predicate labels': pl} for s, l, b, ps, pl in zip(class_scores, class_labels, boxes, pred_scores, pred_labels)]
+
+        return results
+
 
 class MLP(nn.Module):
     """ Very simple multi-layer perceptron (also called FFN)"""
@@ -433,7 +457,7 @@ def build(args):
                              predicate_label_eos_coef=args.predicate_label_eos_coef,
                              losses=losses)
     criterion.to(device)
-    postprocessors = {'bbox': PostProcess()}
+    postprocessors = {'bbox': sg_PostProcess()}
     if args.masks:
         postprocessors['segm'] = PostProcessSegm()
         if args.dataset_file == "coco_panoptic":

@@ -20,3 +20,4 @@ not_tracked_dir/
 *.jpg
 *.jpeg
 *.idea
+MODEL_WEIGHTS/
