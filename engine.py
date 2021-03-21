@@ -278,7 +278,7 @@ def sgg_evaluate(model: torch.nn.Module, criterion: torch.nn.Module,postprocesso
         # recall_100 = score / len(gt_traid)
 
 
-        k = 2000
+        k = 20
         recall[0] = recall[0] + calculate_recall_k(k,pre_traid, pre_sub_box, pre_ob_box, gt_traid, gt_sub_box, gt_ob_box)
         calculate_meanrecall_k(k, mean_recall20_dict, pre_traid, pre_sub_box, pre_ob_box, gt_traid, gt_sub_box,
                                gt_ob_box)
@@ -332,12 +332,6 @@ def sgg_evaluate(model: torch.nn.Module, criterion: torch.nn.Module,postprocesso
         metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         ii += 1
-        if ii == 2000:
-            break
-        mean_recall = final_mean_recall(mean_recall20_dict, mean_recall50_dict, mean_recall100_dict)
-
-        print("mean recall_20:", mean_recall[0], "mean recall_50:", mean_recall[1], "mean recall_100:", mean_recall[2])
-        print("recall_20:", recall[0] / ii, "recall_50:", recall[1] / ii, "recall_100:", recall[2] / ii)
     # gather the stats from all processes
 
     mean_recall = final_mean_recall(mean_recall20_dict,mean_recall50_dict,mean_recall100_dict)
