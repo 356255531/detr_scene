@@ -197,9 +197,8 @@ def sgg_evaluate(model: torch.nn.Module, criterion: torch.nn.Module,postprocesso
         ## get pre_traid
 
         results = postprocessors['bbox'](outputs)
-        pre_class_mask = results[0]['classification labels'].lt(150)
+        pre_class_mask = results[0]['classification scores'].gt(0.6)
         pre_class = results[0]['classification labels'][pre_class_mask]
-        print(len(pre_class))
         pre_class_idx = torch.arange(0, 100)[pre_class_mask]
         pre_sub_idx = pre_class_idx.repeat(len(pre_class_idx),1).transpose(0,1)
         pre_ob_idx = pre_class_idx.repeat(len(pre_class_idx), 1)
@@ -227,44 +226,80 @@ def sgg_evaluate(model: torch.nn.Module, criterion: torch.nn.Module,postprocesso
         # pre_traid
         pre_traid = torch.cat((pre_sub,pre_predicate,pre_ob),1)
 
-        # creat ground truth dict
-        gt_dict = dict()
-        for i, num in enumerate(gt_traid):
-            key = num[0].item()*1e6 + num[1].item()*1e3 + num[2].item()
-            if key in gt_dict:
-                gt_dict[key] = torch.cat((gt_dict[key],torch.cat((gt_sub_box[i],gt_ob_box[i]))))
-            else:
-                gt_dict[key] = torch.cat((gt_sub_box[i],gt_ob_box[i]))
+
+        # # creat ground truth dict
+        # gt_dict = dict()
+        # for i, num in enumerate(gt_traid):
+        #     key = num[0].item()*1e6 + num[1].item()*1e3 + num[2].item()
+        #     if key in gt_dict:
+        #         gt_dict[key] = torch.cat((gt_dict[key],torch.cat((gt_sub_box[i],gt_ob_box[i]))))
+        #     else:
+        #         gt_dict[key] = torch.cat((gt_sub_box[i],gt_ob_box[i]))
 
 
         ##calculate recall 20
-        if len(pre_traid) < 100:
-            suppl = torch.ones(100-len(pre_traid),3) * 200
-            pre_traid = torch.cat((pre_traid,suppl),0)
 
-        # pre_traid[0] = gt_traid[0]
-        # pre_sub_box[0] = gt_dict[12000032][:4]
-        # pre_ob_box[0] = gt_dict[12000032][4:]
+        if len(pre_traid) < 100:
+            suppl = torch.ones(100-len(pre_traid),3) * 100
+            suppl_box = torch.ones(100 - len(pre_traid), 4) * 2
+            pre_traid = torch.cat((pre_traid,suppl),0)
+            pre_sub_box = torch.cat((pre_sub_box,suppl_box),0)
+            pre_ob_box = torch.cat((pre_ob_box, suppl_box), 0)
+
+
+        # creat pre_traid dict
+        pre_dict = dict()
+        for i, num in enumerate(pre_traid):
+            key = num[0].item()*1e6 + num[1].item()*1e3 + num[2].item()
+            if key in pre_dict:
+                pre_dict[key] = torch.cat((pre_dict[key],torch.cat((pre_sub_box[i],pre_ob_box[i]))))
+            else:
+                pre_dict[key] = torch.cat((pre_sub_box[i],pre_ob_box[i]))
 
         score = 0
-        for i in range(100):
-            key = pre_traid[i][0].item() * 1e6 + pre_traid[i][1].item() * 1e3 + pre_traid[i][2].item()
-            if key in gt_dict:
-                for j in range(len(gt_dict[key]) // 8):
-                    src_boxes = gt_dict[key][j*8:j*8+8]
+        for i in range(len(gt_traid)):
+            key = gt_traid[i][0].item() * 1e6 + gt_traid[i][1].item() * 1e3 + gt_traid[i][2].item()
+            if key in pre_dict:
+                for j in range(len(pre_dict[key]) // 8):
+                    src_boxes = pre_dict[key][j*8:j*8+8]
                     iou1 = torch.diag(box_ops.sgg_box_iou(
                         box_ops.box_cxcywh_to_xyxy(src_boxes[:4]).reshape(-1, 4),
-                        box_ops.box_cxcywh_to_xyxy(pre_sub_box[i]).reshape(-1, 4)))
+                        box_ops.box_cxcywh_to_xyxy(gt_sub_box[i]).reshape(-1, 4)))
                     iou2 = torch.diag(box_ops.sgg_box_iou(
                         box_ops.box_cxcywh_to_xyxy(src_boxes[4:]).reshape(-1, 4),
-                        box_ops.box_cxcywh_to_xyxy(pre_ob_box[i]).reshape(-1, 4)))
+                        box_ops.box_cxcywh_to_xyxy(gt_ob_box[i]).reshape(-1, 4)))
                     if iou1 >= 0.5 and iou2 >= 0.5:
                         score += 1
                         break
 
         recall_100 = score / len(gt_traid)
 
-        print(recall_100)
+        print(recall_100,len(gt_traid))
+
+
+        # pre_traid[0] = gt_traid[0]
+        # pre_sub_box[0] = gt_dict[12000032][:4]
+        # pre_ob_box[0] = gt_dict[12000032][4:]
+
+        # score = 0
+        # for i in range(200):
+        #     key = pre_traid[i][0].item() * 1e6 + pre_traid[i][1].item() * 1e3 + pre_traid[i][2].item()
+        #     if key in gt_dict:
+        #         for j in range(len(gt_dict[key]) // 8):
+        #             src_boxes = gt_dict[key][j*8:j*8+8]
+        #             iou1 = torch.diag(box_ops.sgg_box_iou(
+        #                 box_ops.box_cxcywh_to_xyxy(src_boxes[:4]).reshape(-1, 4),
+        #                 box_ops.box_cxcywh_to_xyxy(pre_sub_box[i]).reshape(-1, 4)))
+        #             iou2 = torch.diag(box_ops.sgg_box_iou(
+        #                 box_ops.box_cxcywh_to_xyxy(src_boxes[4:]).reshape(-1, 4),
+        #                 box_ops.box_cxcywh_to_xyxy(pre_ob_box[i]).reshape(-1, 4)))
+        #             if iou1 >= 0.5 and iou2 >= 0.5:
+        #                 score += 1
+        #                 break
+        #
+        # recall_100 = score / len(gt_traid)
+        #
+        # print(recall_100,len(gt_traid))
 
 
 
@@ -282,7 +317,7 @@ def sgg_evaluate(model: torch.nn.Module, criterion: torch.nn.Module,postprocesso
         metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         ii += 1
-        if ii == 2:
+        if ii == 100:
             break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
