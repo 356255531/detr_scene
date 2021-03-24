@@ -6,6 +6,7 @@ import math
 import os
 import sys
 from typing import Iterable
+import numpy as np
 
 import torch
 from util import box_ops
@@ -208,17 +209,36 @@ def sgg_evaluate(model: torch.nn.Module, criterion: torch.nn.Module,postprocesso
         pre_ob_idx = pre_class_idx.repeat(len(pre_class_idx), 1)
 
 
-        des = pre_sub_idx - pre_ob_idx
-        mask = des.ne(0)
+        pre_class_idx_pick = non_max_suppression(pre_class_idx,pre_class,results[0]['boxes'][pre_class_idx], results[0]['classification scores'][pre_class_idx], threshold=0.9)
+        pre_class_idx = pre_class_idx[pre_class_idx_pick]
+        # get rel_idx
+        preboxes = results[0]['boxes'][pre_class_idx]
+        rel_idx = prepare_test_pairs(device, preboxes)
 
-        ##Delete duplicates
-        pre_sub_idx = pre_sub_idx[mask]
-        pre_ob_idx = pre_ob_idx[mask]
-        pre_predicate_idx = pre_sub_idx * 100 + pre_ob_idx
+
+
+        # pre_sub_idx = pre_class_idx.repeat(len(pre_class_idx),1).transpose(0,1)
+        # pre_ob_idx = pre_class_idx.repeat(len(pre_class_idx), 1)
+        #
+        #
+        # des = pre_sub_idx - pre_ob_idx
+        # mask = des.ne(0)
+        #
+        # ##Delete duplicates
+        # pre_sub_idx = pre_sub_idx[mask]
+        # pre_ob_idx = pre_ob_idx[mask]
+        pre_sub_idx = pre_class_idx[rel_idx[:,0]]
+        pre_ob_idx = pre_class_idx[rel_idx[:,1]]
+        pre_predicate_idx = pre_class_idx[rel_idx[:,0]] * 100 + pre_class_idx[rel_idx[:,1]]
         pre_predicate = results[0]['predicate labels'][pre_predicate_idx]
-        pre_predicate_scores = results[0]['predicate scores'][pre_predicate_idx]
+        pre_predicate_scores = results[0]['predicate scores'][pre_predicate_idx].reshape(-1,1)
 
-        pre_predicate_scores, sort_idx = torch.sort(pre_predicate_scores,descending=True)
+
+        pre_sub_scores = results[0]['classification scores'][pre_sub_idx].reshape(-1,1)
+        pre_ob_scores = results[0]['classification scores'][pre_ob_idx].reshape(-1,1)
+        totalscores = torch.cat((pre_sub_scores,pre_ob_scores,pre_predicate_scores),1)
+
+        pre_predicate_scores, sort_idx = torch.sort(torch.prod(totalscores,1),descending=True)
         pre_predicate = pre_predicate[sort_idx].reshape(-1,1)
         pre_sub_idx = pre_sub_idx[sort_idx].reshape(-1,1)
         pre_ob_idx = pre_ob_idx[sort_idx].reshape(-1,1)
@@ -229,6 +249,7 @@ def sgg_evaluate(model: torch.nn.Module, criterion: torch.nn.Module,postprocesso
 
         # pre_traid
         pre_traid = torch.cat((pre_sub,pre_predicate,pre_ob),1)
+
 
 
         # # creat ground truth dict
@@ -332,6 +353,13 @@ def sgg_evaluate(model: torch.nn.Module, criterion: torch.nn.Module,postprocesso
         metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         ii += 1
+        mean_recall = final_mean_recall(mean_recall20_dict, mean_recall50_dict, mean_recall100_dict)
+
+        print("mean recall_20:", mean_recall[0], "mean recall_50:", mean_recall[1], "mean recall_100:", mean_recall[2])
+        print("recall_20:", recall[0] / ii, "recall_50:", recall[1] / ii, "recall_100:", recall[2] / ii)
+
+        # if ii == 20:
+        #     break
     # gather the stats from all processes
 
     mean_recall = final_mean_recall(mean_recall20_dict,mean_recall50_dict,mean_recall100_dict)
@@ -417,4 +445,54 @@ def final_mean_recall(mean_recall20_dict,mean_recall50_dict,mean_recall100_dict)
     return torch.mean(results,1)
 
 
+def non_max_suppression(pre_class_idx,pre_class,boxes, scores, threshold):
+    """执行non-maximum suppression并返回保留的boxes的索引.
+    boxes: [N, (y1, x1, y2, x2)].注意(y2, x2)可以会超过box的边界.
+    scores: box的分数的一维数组.
+    threshold: Float型. 用于过滤IoU的阈值.
+    """
+    if boxes.shape[0] == 0:
+        return pre_class_idx
+    # if boxes.dtype.kind != "f":
+    #     boxes = boxes.astype(np.float32)
+    # 获取根据分数排序的boxes的索引(最高的排在对前面)
+    ixs = scores.argsort()
+    pick = []
+    while len(ixs) > 0:
+        # 选择排在最前的box，并将其索引加到列表中
+        i = ixs[0]
+        pick.append(i)
+        # 计算选择的box与剩下的box的IoU
+        iou = torch.diag(box_ops.sgg_box_iou(
+                    box_ops.box_cxcywh_to_xyxy(boxes[i].repeat(len(ixs)-1,1)),
+                    box_ops.box_cxcywh_to_xyxy(boxes[ixs[1:]])))
+        # 确定IoU大于阈值的boxes. 这里返回的是ix[1:]之后的索引，
+        # 所以为了与ixs保持一致，将结果加1
+        remove_ixs = torch.LongTensor(np.where(iou > threshold)[0] + 1)
+        mask = remove_ixs.lt(0)
+
+        for j,num in enumerate(remove_ixs):
+            if pre_class[ixs[num]] == pre_class[i]:
+                mask[j] = True
+        remove_ixs = remove_ixs[mask]
+        ixs = np.delete(ixs, remove_ixs)
+        ixs = np.delete(ixs, 0)
+    return torch.LongTensor(pick)
+
+
+def prepare_test_pairs(device, proposals):
+    # prepare object pairs for relation prediction
+    rel_pair_idxs = []
+    n = len(proposals)
+    cand_matrix = torch.ones((n, n), device=device) - torch.eye(n, device=device)
+    # mode==sgdet and require_overlap
+    p_to_xyxy = box_ops.box_cxcywh_to_xyxy(proposals)
+    cand_matrix = cand_matrix.byte() & box_ops.sgg_box_iou(p_to_xyxy,p_to_xyxy).gt(0).byte()
+    idxs = torch.nonzero(cand_matrix).view(-1,2)
+    if len(idxs) > 0:
+        rel_pair_idxs.append(idxs)
+    else:
+        # if there is no candidate pairs, give a placeholder of [[0, 0]]
+        idxs = (torch.zeros((1, 2), dtype=torch.int64, device=device))
+    return idxs
 
