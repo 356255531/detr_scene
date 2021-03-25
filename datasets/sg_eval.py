@@ -1,8 +1,10 @@
 """
 Adapted from Danfei Xu. In particular, slow code was removed
 """
+import torch
 import numpy as np
 from functools import reduce
+from util import box_ops
 # from lib.pytorch_misc import intersect_2d, argsort_desc
 # from datasets.box_intersections_cpu.bbox import bbox_overlaps
 # from config import MODES
@@ -50,8 +52,10 @@ class SGRecall(SceneGraphEvaluation):
 
     def calculate_recall(self, global_container, local_container, mode):
         pred_rel_inds = local_container['pred_rel_inds']
+        rel_predicated = local_container['rel_predicated']
         rel_scores = local_container['rel_scores']
         gt_rels = local_container['gt_rels']
+        gt_rels_predicate = local_container['gt_rels_predicate']
         gt_classes = local_container['gt_classes']
         gt_boxes = local_container['gt_boxes']
         pred_classes = local_container['pred_classes']
@@ -60,8 +64,9 @@ class SGRecall(SceneGraphEvaluation):
 
         iou_thres = global_container['iou_thres']
 
-        pred_rels = np.column_stack((pred_rel_inds, 1 + rel_scores[:, 1:].argmax(1)))
-        pred_scores = rel_scores[:, 1:].max(1)
+        gt_rels = np.column_stack((gt_rels, gt_rels_predicate))
+        pred_rels = np.column_stack((pred_rel_inds, rel_predicated))
+        pred_scores = rel_scores
 
         gt_triplets, gt_triplet_boxes, _ = _triplet(gt_rels, gt_classes, gt_boxes)
         local_container['gt_triplets'] = gt_triplets
@@ -69,6 +74,12 @@ class SGRecall(SceneGraphEvaluation):
 
         pred_triplets, pred_triplet_boxes, pred_triplet_scores = _triplet(
             pred_rels, pred_classes, pred_boxes, pred_scores, obj_scores)
+
+
+
+
+
+
 
         # Compute recall. It's most efficient to match once and then do recall after
         pred_to_gt = _compute_pred_matches(
@@ -87,15 +98,88 @@ class SGRecall(SceneGraphEvaluation):
             rec_i = float(len(match)) / float(gt_rels.shape[0])
             self.result_dict[mode + '_recall'][k].append(rec_i)
 
+
         return local_container
 
-evaluator = {}
-result_dict = dict()
-eval_recall = SGRecall(result_dict)
-mode = 'sgdet'
-eval_recall.register_container(mode)
-evaluator['eval_recall'] = eval_recall
-print(evaluator)
+
+class SGMeanRecall(SceneGraphEvaluation):
+    def __init__(self, result_dict, num_rel, ind_to_predicates, print_detail=False):
+        super(SGMeanRecall, self).__init__(result_dict)
+        self.num_rel = num_rel
+        self.print_detail = print_detail
+        self.rel_name_list = ind_to_predicates  # remove __background__
+
+    def register_container(self, mode):
+        # self.result_dict[mode + '_recall_hit'] = {20: [0]*self.num_rel, 50: [0]*self.num_rel, 100: [0]*self.num_rel}
+        # self.result_dict[mode + '_recall_count'] = {20: [0]*self.num_rel, 50: [0]*self.num_rel, 100: [0]*self.num_rel}
+        self.result_dict[mode + '_mean_recall'] = {20: 0.0, 50: 0.0, 100: 0.0}
+        self.result_dict[mode + '_mean_recall_collect'] = {20: [[] for i in range(self.num_rel)],
+                                                           50: [[] for i in range(self.num_rel)],
+                                                           100: [[] for i in range(self.num_rel)]}
+        self.result_dict[mode + '_mean_recall_list'] = {20: [[] for i in range(self.num_rel)],
+                                                           50: [[] for i in range(self.num_rel)],
+                                                           100: [[] for i in range(self.num_rel)]}
+
+    def generate_print_string(self, mode):
+        result_str = 'SGG eval: '
+        for k, v in self.result_dict[mode + '_mean_recall'].items():
+            result_str += '   mR @ %d: %.4f; ' % (k, float(v))
+        result_str += ' for mode=%s, type=Mean Recall.' % mode
+        result_str += '\n'
+        if self.print_detail:
+            result_str += '----------------------- Details ------------------------\n'
+
+            for n, r in zip(self.rel_name_list, self.result_dict[mode + '_mean_recall_list'][100]):
+                result_str += '({}:{:.4f}) '.format(str(n), r)
+            result_str += '\n'
+            result_str += '--------------------------------------------------------\n'
+
+        return result_str
+
+    def collect_mean_recall_items(self, global_container, local_container, mode):
+        pred_to_gt = local_container['pred_to_gt']
+        gt_rels_predicate = local_container['gt_rels_predicate']
+
+        for k in self.result_dict[mode + '_mean_recall_collect']:
+            # the following code are copied from Neural-MOTIFS
+            match = reduce(np.union1d, pred_to_gt[:k])
+            # NOTE: by kaihua, calculate Mean Recall for each category independently
+            # this metric is proposed by: CVPR 2019 oral paper "Learning to Compose Dynamic Tree Structures for Visual Contexts"
+            recall_hit = [0] * self.num_rel
+            recall_count = [0] * self.num_rel
+            for idx in range(gt_rels_predicate.shape[0]):
+                local_label = gt_rels_predicate[idx]
+                recall_count[int(local_label)] += 1
+                # recall_count[0] += 1
+
+            for idx in range(len(match)):
+                local_label = gt_rels_predicate[int(match[idx])]
+                recall_hit[int(local_label)] += 1
+                # recall_hit[0] += 1
+
+            for n in range(self.num_rel):
+                if recall_count[n] > 0:
+                    self.result_dict[mode + '_mean_recall_collect'][k][n].append(float(recall_hit[n] / recall_count[n]))
+
+    def calculate_mean_recall(self, mode):
+        for k, v in self.result_dict[mode + '_mean_recall'].items():
+            sum_recall = 0
+            num_rel_no_bg = self.num_rel
+            for idx in range(num_rel_no_bg):
+                if len(self.result_dict[mode + '_mean_recall_collect'][k][idx]) == 0:
+                    tmp_recall = 0.0
+                else:
+                    tmp_recall = np.mean(self.result_dict[mode + '_mean_recall_collect'][k][idx])
+                self.result_dict[mode + '_mean_recall_list'][k][idx] = tmp_recall
+                sum_recall += tmp_recall
+
+            self.result_dict[mode + '_mean_recall'][k] = sum_recall / float(num_rel_no_bg)
+        return
+
+
+
+
+
 
 
 def evaluate_relation_of_one_image(groundtruth, prediction, global_container, evaluator):
@@ -397,35 +481,36 @@ def evaluate_recall(gt_rels, gt_boxes, gt_classes,
     return pred_to_gt, pred_5ples, relation_scores
 
 
-def _triplet(predicates, relations, classes, boxes,
-             predicate_scores=None, class_scores=None):
+def _triplet(relations, classes, boxes, predicate_scores=None, class_scores=None):
     """
-    format predictions into triplets
-    :param predicates: A 1d numpy array of num_boxes*(num_boxes-1) predicates, corresponding to
-                       each pair of possibilities
-    :param relations: A (num_boxes*(num_boxes-1), 2) array, where each row represents the boxes
-                      in that relation
-    :param classes: A (num_boxes) array of the classes for each thing.
-    :param boxes: A (num_boxes,4) array of the bounding boxes for everything.
-    :param predicate_scores: A (num_boxes*(num_boxes-1)) array of the scores for each predicate
-    :param class_scores: A (num_boxes) array of the likelihood for each object.
-    :return: Triplets: (num_relations, 3) array of class, relation, class
-             Triplet boxes: (num_relation, 8) array of boxes for the parts
-             Triplet scores: num_relation array of the scores overall for the triplets
+    format relations of (sub_id, ob_id, pred_label) into triplets of (sub_label, pred_label, ob_label)
+    Parameters:
+        relations (#rel, 3) : (sub_id, ob_id, pred_label)
+        classes (#objs, ) : class labels of objects
+        boxes (#objs, 4)
+        predicate_scores (#rel, ) : scores for each predicate
+        class_scores (#objs, ) : scores for each object
+    Returns:
+        triplets (#rel, 3) : (sub_label, pred_label, ob_label)
+        triplets_boxes (#rel, 8) array of boxes for the parts
+        triplets_scores (#rel, 3) : (sub_score, pred_score, ob_score)
     """
-    assert (predicates.shape[0] == relations.shape[0])
-
-    sub_ob_classes = classes[relations[:, :2]]
-    triplets = np.column_stack((sub_ob_classes[:, 0], predicates, sub_ob_classes[:, 1]))
-    triplet_boxes = np.column_stack((boxes[relations[:, 0]], boxes[relations[:, 1]]))
+    sub_id, ob_id, pred_label = relations[:, 0], relations[:, 1], relations[:, 2]
+    triplets = np.column_stack((classes[sub_id], pred_label, classes[ob_id]))
+    triplet_boxes = np.column_stack((boxes[sub_id], boxes[ob_id]))
 
     triplet_scores = None
     if predicate_scores is not None and class_scores is not None:
         triplet_scores = np.column_stack((
-            class_scores[relations[:, 0]],
-            class_scores[relations[:, 1]],
-            predicate_scores,
+            class_scores[sub_id], predicate_scores, class_scores[ob_id],
         ))
+        scores_overall = triplet_scores.prod(1)
+        score_inds = np.argsort(-scores_overall,axis=0)
+        triplets = triplets[score_inds]
+        triplet_boxes = triplet_boxes[score_inds]
+        triplet_scores = triplet_scores[score_inds]
+
+
 
     return triplets, triplet_boxes, triplet_scores
 
@@ -453,23 +538,13 @@ def _compute_pred_matches(gt_triplets, pred_triplets,
                                          keeps[gt_has_match],
                                          ):
         boxes = pred_boxes[keep_inds]
-        if phrdet:
-            # Evaluate where the union box > 0.5
-            gt_box_union = gt_box.reshape((2, 4))
-            gt_box_union = np.concatenate((gt_box_union.min(0)[:2], gt_box_union.max(0)[2:]), 0)
 
-            box_union = boxes.reshape((-1, 2, 4))
-            box_union = np.concatenate((box_union.min(1)[:,:2], box_union.max(1)[:,2:]), 1)
+        sub_iou = box_ops.sgg_box_iou(torch.from_numpy(np.repeat(gt_box[:4].reshape(1,4), len(boxes), axis=0)), torch.from_numpy(boxes[:, :4]))[0]
+        obj_iou = box_ops.sgg_box_iou(torch.from_numpy(np.repeat(gt_box[4:].reshape(1,4), len(boxes), axis=0)), torch.from_numpy(boxes[:, 4:]))[0]
 
-            inds = bbox_overlaps(gt_box_union[None], box_union)[0] >= iou_thresh
+        inds = (sub_iou >= iou_thresh) & (obj_iou >= iou_thresh)
 
-        else:
-            sub_iou = bbox_overlaps(gt_box[None,:4], boxes[:, :4])[0]
-            obj_iou = bbox_overlaps(gt_box[None,4:], boxes[:, 4:])[0]
-
-            inds = (sub_iou >= iou_thresh) & (obj_iou >= iou_thresh)
-
-        for i in np.where(keep_inds)[0][inds]:
+        for i in np.where(keep_inds)[0][inds.cpu().numpy()]:
             pred_to_gt[i].append(int(gt_ind))
     return pred_to_gt
 
