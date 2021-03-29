@@ -17,6 +17,8 @@ from datasets.panoptic_eval import PanopticEvaluator
 
 from datasets.sg_eval import SGRecall,SGMeanRecall
 from datasets.do_sgg_eval import do_sgg_eval
+from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -180,6 +182,10 @@ def sgg_evaluate(model: torch.nn.Module, criterion: torch.nn.Module,postprocesso
     evaluator['eval_mean_recall'] = eval_mean_recall
     result_str = '\n' + '=' * 100 + '\n'
 
+    fauxcoco = COCO()
+    predictions = []
+    groundtruths = []
+
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -201,7 +207,10 @@ def sgg_evaluate(model: torch.nn.Module, criterion: torch.nn.Module,postprocesso
 
 
         results = postprocessors['bbox'](outputs)
-        for i, (result, target) in enumerate(zip(results, targets)):
+
+        for i, (target, result) in enumerate(zip(targets,results)):
+            predictions.append(result)
+            groundtruths.append(target)
             do_sgg_eval(target,result,device,mode,evaluator,result_dict)
 
 
@@ -210,20 +219,65 @@ def sgg_evaluate(model: torch.nn.Module, criterion: torch.nn.Module,postprocesso
             print(loss_dict_reduced)
             sys.exit(1)
 
-        # optimizer.zero_grad()
-        # losses.backward()
-        # if max_norm > 0:
-        #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        # optimizer.step()
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         ii += 1
-        # if ii == 20:
+        # if ii == 5:
         #     break
     # gather the stats from all processes
+    anns = []
+    for image_id, gt in enumerate(groundtruths):
+        labels = gt['labels'].tolist()  # integer
+        boxes = box_ops.box_cxcywh_to_xyxy(gt['boxes'] * 1000).tolist()  # xyxy
+        for cls, box in zip(labels, boxes):
+            anns.append({
+                'area': (box[3] - box[1] + 1) * (box[2] - box[0] + 1),
+                'bbox': [box[0], box[1], box[2] - box[0] + 1, box[3] - box[1] + 1],  # xywh
+                'category_id': cls,
+                'id': len(anns),
+                'image_id': image_id,
+                'iscrowd': 0,
+            })
 
-    result_str = eval_recall.generate_print_string(mode)
+    fauxcoco.dataset = {
+        'info': {'description': 'use coco script for vg detection evaluation'},
+        'images': [{'id': i} for i in range(len(groundtruths))],
+        'categories': [
+            {'supercategory': 'person', 'id': i, 'name': i}
+            for i in range(150)
+        ],
+        'annotations': anns,
+    }
+    fauxcoco.createIndex()
+
+    # format predictions to coco-like
+    cocolike_predictions = []
+
+    for image_id, prediction in enumerate(predictions):
+        box = box_ops.box_cxcywh_to_xywh(prediction['boxes'] * 1000).detach().cpu().numpy()  # xywh
+        score = prediction['classification scores'].detach().cpu().numpy()  # (#objs,)
+        label = prediction['classification labels'].detach().cpu().numpy()  # (#objs,)
+        # for predcls, we set label and score to groundtruth
+
+        image_id = np.asarray([image_id] * len(box))
+        cocolike_predictions.append(
+            np.column_stack((image_id, box, score, label))
+        )
+        # logger.info(cocolike_predictions)
+    cocolike_predictions = np.concatenate(cocolike_predictions, 0)
+    # evaluate via coco API
+    res = fauxcoco.loadRes(cocolike_predictions)
+    coco_eval = COCOeval(fauxcoco, res, 'bbox')
+    coco_eval.params.imgIds = list(range(len(groundtruths)))
+    coco_eval.evaluate()
+    coco_eval.accumulate()
+    coco_eval.summarize()
+    mAp = coco_eval.stats[1]
+
+    result_str += 'Detection evaluation mAp=%.4f\n' % mAp
+    result_str += '=' * 100 + '\n'
+    result_str += eval_recall.generate_print_string(mode)
     eval_mean_recall.calculate_mean_recall(mode)
     result_str += eval_mean_recall.generate_print_string(mode)
     print(result_str)
