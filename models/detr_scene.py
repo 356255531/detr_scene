@@ -45,7 +45,7 @@ class DETRScene(nn.Module):
     def forward(self, samples: NestedTensor):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
-               - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
+               - samples.tensorles.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
 
             It returns a dict with the following elements:
                - "pred_logits": the classification logits (including no-object) for all queries.
