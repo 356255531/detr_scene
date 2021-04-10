@@ -1,17 +1,16 @@
 import tkinter as tk
-from PIL import Image, ImageTk
-from tkinter import filedialog
 import matplotlib.pyplot as plt
 import datasets.transforms as T
-from datasets.do_sgg_eval import non_max_suppression,prepare_test_pairs
-from main_scene import get_args_parser
 import argparse
-from models import build_scene_model
 import torch
-from util import box_ops
 import numpy as np
 import cv2
 import networkx as nx
+from datasets.do_sgg_eval import non_max_suppression,prepare_test_pairs
+from main_scene import get_args_parser
+from PIL import Image, ImageTk
+from models import build_scene_model
+from util import box_ops
 
 
 def prediction(image):
@@ -33,7 +32,7 @@ def prediction(image):
     pre_class_idx = torch.arange(0, 100)[pre_class_mask]
 
     pre_class_idx_pick = non_max_suppression(pre_class_idx, pre_class, results[0]['boxes'][pre_class_idx],
-                                             results[0]['classification scores'][pre_class_idx], threshold=0.7)
+                                             results[0]['classification scores'][pre_class_idx], threshold=0.6)
     pre_class_idx = pre_class_idx[pre_class_idx_pick]
     pre_class = results[0]['classification labels'][pre_class_idx]
     pre_class_score = results[0]['classification scores'][pre_class_idx]
@@ -60,9 +59,6 @@ def prediction(image):
 
     box = box_ops.box_cxcywh_to_xywh(preboxes)
 
-    # plt.rcParams.update({
-    #     'figure.figsize': (x/100,y/100)
-    # })
     image_array = np.array(image)
     im_output = Image.fromarray(image_array)
     plt.imshow(im_output)
@@ -72,9 +68,7 @@ def prediction(image):
     li = list(OBJECT_NAME_DICT.keys())
     colours = ["#FF0000", "#FF8000", "#FFFF00", "#00FF00", "#00FFFF", "#0000FF", "#007FFF", "#7F00FF", "#FF00FF", "#7F7F7F",
                'peru', 'brown', 'chartreuse', 'lightcoral', 'gold', 'hotpink', 'deepskyblue', 'mediumpurple', 'olive',
-               'dimgrey']
-
-
+               'dimgrey',"#FF8800", "#FF8088", "#FFFF88", "#008800", "#008888", "#000088"]
     for n in range(len(box)):
         ax.add_patch(plt.Rectangle((box[n][0] * x, box[n][1] * y),
                                    box[n][2] * x, box[n][3] * y, fill=False, color=colours[n], linewidth=3))
@@ -82,18 +76,20 @@ def prediction(image):
         ax.text(box[n][0] * x, box[n][1] * y, text, fontsize=15, bbox=dict(facecolor=colours[n], alpha=0.5))
     plt.axis('off')
     plt.savefig('save_obj.jpg')
-    plt.show()
     plt.close('all')
 
+    if len(pre_rel)<10:
+        num = len(pre_rel)
+    else:
+        num = 10
+    predicate_li = list(PREDICATE_DICT.keys())
+
+    ## show prediction tuple
     # image = Image.open('start.jpg').resize((720, 720))
     # image_array = np.array(image)
     # im_output = Image.fromarray(image_array)
     # plt.imshow(im_output)
-    if len(pre_rel)<10:
-        n = len(pre_rel)
-    else:
-        n = 10
-    predicate_li = list(PREDICATE_DICT.keys())
+
     # ax = plt.gca()
     # num = 0
     # rel_dict = {}
@@ -126,7 +122,7 @@ def prediction(image):
         G.add_node(text)
 
 
-    for i in range(n):
+    for i in range(num):
         key = rel_idx[:, 1][indices][i].item() * 30 + rel_idx[:, 0][indices][i].item()
         if key not in rel_dict:
             key = rel_idx[:, 0][indices][i].item() * 30 + rel_idx[:, 1][indices][i].item()
@@ -136,18 +132,16 @@ def prediction(image):
             text3= f'{rel_idx[:, 1][indices][i].item(), li[pre_obj[i]]}'
             G.add_edge(text1, text3,l=text2)
 
-    nx.draw(G,pos = nx.spiral_layout(G),node_size=1500, with_labels=True, node_color=colours[:len(box)],alpha=0.5)
+    nx.draw(G,pos = nx.spiral_layout(G),node_size=1500, with_labels=True, node_color=colours[:len(box)])
     edge_labels = nx.get_edge_attributes(G, "l")
     nx.draw_networkx_edge_labels(G,pos=nx.spiral_layout(G),edge_labels=edge_labels,label_pos=0.5,font_size=15)
     plt.savefig('save_rel.jpg')
-    plt.show()
-
-
+    plt.close('all')
 
 
 def showfunc():
     global imaLabel,relLabel
-    # load in the image file
+    ## load in the image file
     # imaPath = filedialog.askopenfilename()
     # image = Image.open(imaPath)
     # prediction(image)
@@ -163,14 +157,36 @@ def showfunc():
     # relLabel.image = newCover
     # relLabel.update()
 
-    # load in the video file
-    videoPath = filedialog.askopenfilename()
-    videoCapture = cv2.VideoCapture(videoPath)
+    # # load in the video file
+    # videoPath = filedialog.askopenfilename()
+    # videoCapture = cv2.VideoCapture(videoPath)
+    # # get a frame
+    # sucess, frame = videoCapture.read()
+    # while (sucess):
+    #     sucess, frame = videoCapture.read()
+    #     cv2frame = cv2.resize(frame, (720, 500))  # resize it to (1024,768)
+    #     cv2.imwrite('frame.jpg', cv2frame)
+    #     image = Image.open('frame.jpg')
+    #     prediction(image)
+    #     newImage = Image.open('save_obj.jpg')
+    #     newCover = ImageTk.PhotoImage(image=newImage)
+    #     imaLabel.configure(image=newCover)
+    #     imaLabel.image = newCover
+    #     imaLabel.update()
+    #
+    #     newImage = Image.open('save_rel.jpg').resize((720, 720))
+    #     newCover = ImageTk.PhotoImage(image=newImage)
+    #     relLabel.configure(image=newCover)
+    #     relLabel.image = newCover
+    #     relLabel.update()
+
+    #load video from camera
+    videoCapture = cv2.VideoCapture(0)
     # get a frame
     sucess, frame = videoCapture.read()
     while (sucess):
         sucess, frame = videoCapture.read()
-        cv2frame = cv2.resize(frame, (720, 500))  # resize it to (1024,768)
+        cv2frame = cv2.resize(frame, (720, 500))
         cv2.imwrite('frame.jpg', cv2frame)
         image = Image.open('frame.jpg')
         prediction(image)
@@ -185,7 +201,6 @@ def showfunc():
         relLabel.configure(image=newCover)
         relLabel.image = newCover
         relLabel.update()
-
 
 
 def show_window():
@@ -208,7 +223,7 @@ def show_window():
     det_label = tk.Label(window, text='object detection:', font=('Arial',15), width=30, height=2)
     det_label.place(x=0, y=0)
 
-    b = tk.Button(window,text='choose image', font=('Arial',15),width=15, height=2,
+    b = tk.Button(window,text='open the camera', font=('Arial',15),width=15, height=2,
               cursor='hand2', command=showfunc)
     b.place(x=300,y=600)
     window.mainloop()
@@ -260,5 +275,3 @@ model.to(device)
 checkpoint = torch.load(args.resume, map_location='cpu')
 model.load_state_dict(checkpoint['model'])
 show_window()
-
-
