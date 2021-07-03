@@ -3,7 +3,7 @@
 PyTorch training code. We added a new output to the model based on **DETR** (**DE**tection **TR**ansformer) to predict the relationship(predicate) between the two objects.
 
 
-![DETR](.github/DETR.png)
+![DETR](.github/SGGTR.png)
 
 **What it is**. Unlike traditional computer vision techniques, SGGTR approaches object detection and scene graph generation as a direct set prediction problem. It consists of a set-based global loss, which forces unique predictions via bipartite matching, and a Transformer encoder-decoder architecture. 
 Given a fixed small set of learned object queries, SGGTR reasons about the relations of the objects and the global image context to directly output the final set of predictions in parallel. Due to this parallel nature, SGGTR is very fast and efficient.
