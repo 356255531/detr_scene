@@ -75,7 +75,7 @@ def prediction(image):
         text = f'{n,li[pre_class[n]]}'
         ax.text(box[n][0] * x, box[n][1] * y, text, fontsize=15, bbox=dict(facecolor=colours[n], alpha=0.5))
     plt.axis('off')
-    plt.savefig('save_obj.jpg')
+    plt.savefig('visualization/save_obj.jpg')
     plt.close('all')
 
     if len(pre_rel)<10:
@@ -84,36 +84,6 @@ def prediction(image):
         num = 10
     predicate_li = list(PREDICATE_DICT.keys())
 
-    ## show prediction tuple
-    # image = Image.open('start.jpg').resize((720, 720))
-    # image_array = np.array(image)
-    # im_output = Image.fromarray(image_array)
-    # plt.imshow(im_output)
-
-    # ax = plt.gca()
-    # num = 0
-    # rel_dict = {}
-    # for i in range(n):
-    #     key = rel_idx[:, 1][indices][i].item()*30 + rel_idx[:, 0][indices][i].item()
-    #     if key not in rel_dict:
-    #         key = rel_idx[:, 0][indices][i].item() * 30 + rel_idx[:, 1][indices][i].item()
-    #         rel_dict[key] = 1
-    #         text = f'{rel_idx[:, 0][indices][i].item(),li[pre_sub[i]]}'
-    #         ax.text(0, 10+num*40, text, fontsize=6, bbox=dict(boxstyle='round,pad=0.5',facecolor=colours[rel_idx[:, 0][indices][i].item()], alpha=0.5))
-    #         text = f'{predicate_li[pre_rel[i]]}'
-    #         ax.text(200, num * 40, text, fontsize=8,color='blue')
-    #         ax.arrow(110, 3+num*40, 250, 0, head_width=20, head_length=20, shape="full", fc='gray',ec='gray', alpha=0.5,
-    #                  overhang=0.5)
-    #         text = f'{rel_idx[:, 1][indices][i].item(),li[pre_obj[i]]}'
-    #         ax.text(400, 10+num * 40, text, fontsize=6, bbox=dict(boxstyle='round,pad=0.5',facecolor=colours[rel_idx[:, 1][indices][i].item()], alpha=0.5))
-    #         num += 1
-    # plt.axis('off')
-    # plt.savefig('save_rel.jpg')
-    # plt.show()
-
-    # plt.rcParams.update({
-    #     'figure.figsize': (7.2, 7.2)
-    # })
     rel_dict = {}
     G = nx.DiGraph()
 
@@ -135,51 +105,12 @@ def prediction(image):
     nx.draw(G,pos = nx.spiral_layout(G),node_size=1500, with_labels=True, node_color=colours[:len(box)])
     edge_labels = nx.get_edge_attributes(G, "l")
     nx.draw_networkx_edge_labels(G,pos=nx.spiral_layout(G),edge_labels=edge_labels,label_pos=0.5,font_size=15)
-    plt.savefig('save_rel.jpg')
+    plt.savefig('visualization/save_rel.jpg')
     plt.close('all')
 
 
 def showfunc():
     global imaLabel,relLabel
-    ## load in the image file
-    # imaPath = filedialog.askopenfilename()
-    # image = Image.open(imaPath)
-    # prediction(image)
-    # newImage = Image.open('save_obj.jpg')
-    # newCover = ImageTk.PhotoImage(image=newImage)
-    # imaLabel.configure(image=newCover)
-    # imaLabel.image = newCover
-    # imaLabel.update()
-    #
-    # newImage = Image.open('save_rel.jpg').resize((720,720))
-    # newCover = ImageTk.PhotoImage(image=newImage)
-    # relLabel.configure(image=newCover)
-    # relLabel.image = newCover
-    # relLabel.update()
-
-    # # load in the video file
-    # videoPath = filedialog.askopenfilename()
-    # videoCapture = cv2.VideoCapture(videoPath)
-    # # get a frame
-    # sucess, frame = videoCapture.read()
-    # while (sucess):
-    #     sucess, frame = videoCapture.read()
-    #     cv2frame = cv2.resize(frame, (720, 500))  # resize it to (1024,768)
-    #     cv2.imwrite('frame.jpg', cv2frame)
-    #     image = Image.open('frame.jpg')
-    #     prediction(image)
-    #     newImage = Image.open('save_obj.jpg')
-    #     newCover = ImageTk.PhotoImage(image=newImage)
-    #     imaLabel.configure(image=newCover)
-    #     imaLabel.image = newCover
-    #     imaLabel.update()
-    #
-    #     newImage = Image.open('save_rel.jpg').resize((720, 720))
-    #     newCover = ImageTk.PhotoImage(image=newImage)
-    #     relLabel.configure(image=newCover)
-    #     relLabel.image = newCover
-    #     relLabel.update()
-
     #load video from camera
     videoCapture = cv2.VideoCapture(0)
     # get a frame
@@ -187,16 +118,16 @@ def showfunc():
     while (sucess):
         sucess, frame = videoCapture.read()
         cv2frame = cv2.resize(frame, (720, 500))
-        cv2.imwrite('frame.jpg', cv2frame)
-        image = Image.open('frame.jpg')
+        cv2.imwrite('visualization/frame.jpg', cv2frame)
+        image = Image.open('visualization/frame.jpg')
         prediction(image)
-        newImage = Image.open('save_obj.jpg')
+        newImage = Image.open('visualization/save_obj.jpg')
         newCover = ImageTk.PhotoImage(image=newImage)
         imaLabel.configure(image=newCover)
         imaLabel.image = newCover
         imaLabel.update()
 
-        newImage = Image.open('save_rel.jpg').resize((720, 720))
+        newImage = Image.open('visualization/save_rel.jpg').resize((720, 720))
         newCover = ImageTk.PhotoImage(image=newImage)
         relLabel.configure(image=newCover)
         relLabel.image = newCover
@@ -209,11 +140,11 @@ def show_window():
     window.title('scene graph generation')
     window.geometry('1500x800')
 
-    image = Image.open('start.jpg').resize((720,500))
+    image = Image.open('visualization/start.jpg').resize((720,500))
     cover = ImageTk.PhotoImage(image=image)
     imaLabel = tk.Label(window, width=720, height=500, bd=0, image=cover)
     imaLabel.place(x=0,y=50)
-    image1 = Image.open('start.jpg').resize((720,720))
+    image1 = Image.open('visualization/start.jpg').resize((720,720))
     cover1 = ImageTk.PhotoImage(image=image1)
     relLabel = tk.Label(window, width=720, height=720, bd=0, image=cover1)
     relLabel.place(x=750, y=50)
@@ -255,7 +186,7 @@ OBJECT_NAME_DICT = {'man': 79697, 'window': 54583, 'person': 52876, 'woman': 357
                     'desk': 4176, 'board': 4168, 'wave': 4147, 'sunglasses': 4129, 'edge': 4119, 'paper': 3994,
                     'vase': 3983, 'lamp': 3950, 'lines': 3936, 'brick': 3907, 'phone': 3888, 'ceiling': 3860,
                     'book': 3785, 'airplane': 3695, 'laptop': 3691, 'vehicle': 3686, 'headlight': 3678,
-                    'coat': 3639, 'a': 222}
+                    'coat': 3639, 'ball': 3624}
 PREDICATE_DICT = {'on': 284572, 'have': 124330, 'in': 89147, 'wearing': 80107, 'of': 72283, 'with': 20517,
                   'behind': 18353, 'holding': 12781, 'standing': 12307, 'near': 11739, 'sitting': 11569,
                   'next': 10376, 'walking': 6991, 'riding': 6813, 'are': 6718, 'by': 6517, 'under': 6319,
@@ -265,7 +196,7 @@ PREDICATE_DICT = {'on': 284572, 'have': 124330, 'in': 89147, 'wearing': 80107, '
                   'belonging': 1976, 'covered': 1891, 'growing': 1678, 'covering': 1642, 'driving': 1536,
                   'lying': 1456, 'around': 1454, 'below': 1408, 'painted': 1386, 'against': 1381, 'along': 1353,
                   'for': 1272, 'crossing': 1134, 'mounted': 1083, 'playing': 1053, 'outside': 1012,
-                  'watching': 992}
+                  'watching': 992,'to': 988}
 
 parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
 args = parser.parse_args()
